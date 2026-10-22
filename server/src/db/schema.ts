@@ -41,6 +41,10 @@ export const attachmentDerivedTextStatus = pgEnum("attachment_derived_text_statu
   "pending",
   "done",
   "failed",
+  // The derivation engine for this attachment's kind is not wired up yet
+  // (e.g. OCR, chosen in T07). Distinct from "failed": nothing went
+  // wrong and retrying will not help, so pg-boss must not retry it.
+  "not_available",
 ]);
 
 export const chatMessageRole = pgEnum("chat_message_role", ["user", "assistant", "tool"]);
@@ -76,21 +80,27 @@ export const topics = pgTable(
 );
 
 /**
- * The immutable raw log: everything the owner sends. Text entries carry
- * the owner's text verbatim; photo and voice entries carry the OCR text
- * or transcript derived from their attachment. Rows are never updated in
- * place (no `updated_at`) — a correction creates new memories, it does
- * not rewrite the entry.
+ * The immutable raw log: everything the owner sends. Rows are never
+ * updated in place for their own authored content — a correction creates
+ * new memories, it does not rewrite the entry. `derivedText` is the one
+ * documented exception (see its own comment below).
  */
 export const entries = pgTable(
   "entries",
   {
     id: uuid("id").primaryKey().defaultRandom(),
     kind: entryKind("kind").notNull(),
-    // User text for "text" entries, OCR text for "photo", transcript for
-    // "voice". Nullable because derivation (OCR/transcription) can still
-    // be pending when the row is first written.
+    // The owner's own authored text: the full text for a "text" entry, or
+    // an optional caption for a "photo"/"voice" entry. Set once, at
+    // ingestion time, and never mutated afterwards.
     textBody: text("text_body"),
+    // OCR text ("photo") or transcript ("voice"), filled in by the T04
+    // async derivation job. Starts `null` and is written exactly once,
+    // when the job completes — never overwritten afterwards, so the
+    // owner's own `textBody` (the caption) is never clobbered by a
+    // transcript that arrives later. `null` forever for "text" entries,
+    // which have no attachment to derive anything from.
+    derivedText: text("derived_text"),
     // Free-form provenance (e.g. share-target app, client app version).
     source: jsonb("source"),
     // Any other derived/structured metadata that does not deserve its own
@@ -98,13 +108,14 @@ export const entries = pgTable(
     metadata: jsonb("metadata"),
     embedding: vector("embedding", { dimensions: EMBEDDING_DIMENSIONS }),
     searchVector: tsvector("search_vector").generatedAlwaysAs(
-      sql`to_tsvector('spanish', coalesce(text_body, ''))`,
+      sql`to_tsvector('spanish', coalesce(text_body, '') || ' ' || coalesce(derived_text, ''))`,
     ),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
     index("entries_kind_idx").on(table.kind),
     index("entries_text_body_trgm_idx").using("gin", sql`${table.textBody} gin_trgm_ops`),
+    index("entries_derived_text_trgm_idx").using("gin", sql`${table.derivedText} gin_trgm_ops`),
     index("entries_search_vector_idx").using("gin", table.searchVector),
     index("entries_embedding_hnsw_idx").using("hnsw", sql`${table.embedding} vector_cosine_ops`),
   ],

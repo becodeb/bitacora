@@ -15,6 +15,13 @@
       "when": 1792688040341,
       "tag": "0001_data_model",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1792689000506,
+      "tag": "0002_mature_spencer_smythe",
+      "breakpoints": true
     }
   ]
 }
