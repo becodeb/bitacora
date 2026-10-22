@@ -117,12 +117,20 @@ Out:
 - **Delivery.**
   - Forecast: about 8,000 authored lines.
   - Strategy: `ask-on-risk`.
-  - **The chain strategy is not answered yet. Ask it before the first commit**, with these options:
-    1. stacked PRs to main (recommended);
-    2. feature-branch chain;
-    3. a single PR with `size:exception`.
-  - No commits exist yet. T01 and T02 are verified but uncommitted.
-  - Commit order: T01, then T02 as four work units (port and helpers, AssemblyAI, Speechmatics, Groq).
+  - **Chain strategy: stacked PRs to main** (owner choice, 2026-10-22).
+  - There is no remote yet, so the branches are local until T11.
+  - Each work unit is one branch stacked on the previous one, and each is a future PR:
+
+    | # | Branch | Commit | Lines | Notes |
+    |---|---|---|---|---|
+    | 0 | `main` | `80431b8` base: plan and `.gitignore` | 247 | docs only |
+    | 1 | `feat/server-scaffold` | `9dc454e` T01 | 762 + 3,582 lockfile | over 400; one cohesive scaffold, `size:exception` |
+    | 2 | `feat/transcription-port` | `d59007e` T02 port | 577 | over 400; types, errors and helpers only make sense together |
+    | 3 | `feat/transcription-assemblyai` | `d53a98c` T02 | 442 | about 400 with fixtures |
+    | 4 | `feat/transcription-speechmatics` | `3bebec5` T02 | 821 | over 400; 151 lines are fixtures, rest is one adapter |
+    | 5 | `feat/transcription-groq` | `f38a258` T02 | 254 | |
+
+  - The next task branches from the top of the stack.
 
 ## Tasks
 
@@ -135,8 +143,8 @@ The parent passes the task, this document and the verification commands to every
 
 ### Stage 1: chat that knows you
 
-- [x] T01 Server scaffold. Delegated. Done and verified; the commit is pending.
-- [x] T02 Transcription port and adapters for AssemblyAI, Speechmatics and Groq. Delegated. Done and verified; the commit is pending.
+- [x] T01 Server scaffold. Delegated. Commit `9dc454e`.
+- [x] T02 Transcription port and adapters for AssemblyAI, Speechmatics and Groq. Delegated. Commits `d59007e`, `d53a98c`, `3bebec5`, `f38a258`.
 - [ ] T03 Data model and migrations. Delegated.
   - Entries (the raw log) and attachments.
   - Topics, memories (with validity and `supersedes`) and rules.
@@ -217,6 +225,7 @@ The parent passes the task, this document and the verification commands to every
     - there is no `baseUrl` override;
     - the Groq prompt is capped at 224 tokens;
     - Groq has no `aac`, so recordings use `.m4a`.
+- **Commits (2026-10-22).** Stacked PRs to main chosen. T01 and T02 committed as five stacked branches. Each branch passes typecheck, lint and tests on its own (23, 41, 46, 61 and 65 tests).
 - **Pivot (rev 4).** The plan changed:
   - It moved to the chat-and-memory focus.
   - The Telegram option was rejected.
@@ -227,6 +236,5 @@ The parent passes the task, this document and the verification commands to every
 
 ## Next step
 
-1. Ask the chain strategy, then commit T01 and T02.
-2. Start T03.
-3. The owner adds the keys file for T04–T06.
+1. Start T03 on a new branch stacked on `feat/transcription-groq`.
+2. The owner adds the keys file for T04–T06.
