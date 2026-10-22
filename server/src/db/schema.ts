@@ -252,6 +252,39 @@ export const chatMessages = pgTable(
 );
 
 /**
+ * Per-model-call audit log for the agent turn (T06). One row per Claude
+ * API request made while handling a turn — a single turn can make
+ * several, one per tool-loop iteration (see `agent/run-turn.ts`). This
+ * is what makes acceptance criterion 4 ("nothing about the owner enters
+ * a prompt unless related") auditable: `requestJson` holds exactly what
+ * was sent.
+ */
+export const agentRuns = pgTable(
+  "agent_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    // Groups every model call made while handling one turn, and doubles
+    // as `changeLog.actionGroupId` for that turn's mutations (see
+    // `memory/service.ts`), so a run and the change it caused are
+    // linked by the same id.
+    turnId: uuid("turn_id").notNull(),
+    // The exact request sent: system text, the message list (roles and
+    // content, not reserializing SDK-internal fields), and the tool
+    // names offered. Never includes the API key.
+    requestJson: jsonb("request_json").notNull(),
+    stopReason: text("stop_reason"),
+    // { inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens }
+    usage: jsonb("usage"),
+    // Estimated from `usage` and the pricing in `agent/pricing.ts`; null
+    // when usage itself is unavailable (e.g. the call errored).
+    estimatedCostUsd: text("estimated_cost_usd"),
+    latencyMillis: integer("latency_millis").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("agent_runs_turn_id_idx").on(table.turnId)],
+);
+
+/**
  * One row per calendar date, holding the diary summary built by the
  * nightly consolidation job (T08).
  */

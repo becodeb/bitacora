@@ -29,6 +29,13 @@
       "when": 1792694128634,
       "tag": "0003_enable_unaccent",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1792695131097,
+      "tag": "0004_wild_secret_warriors",
+      "breakpoints": true
     }
   ]
 }
