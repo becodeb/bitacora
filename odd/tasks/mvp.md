@@ -135,7 +135,11 @@ Out:
     | 8 | `feat/derivation-jobs` | `344ed7c` T04 jobs | 674 | over 400; half is tests |
     | 9 | `feat/entries-http` | `3d58234` T04 HTTP, plus the body-limit fix | 484 + fix | |
     | 10 | `feat/embeddings` | `9bf11b0` T05 embedder and jobs | 852 | over 400; adapter, queue and enqueue points belong together |
-    | 11 | `feat/hybrid-search` | `8f42dc5` T05 search, plus `77c2610` fix | 708 + 510 | over 400; search with its calibration fix |
+    | 11 | `feat/hybrid-search` | `8f42dc5` T05 search, plus `77c2610` fix | 708 + 510 | over 400; search with its calibration fix; plus `8fdb320` doc |
+    | 12 | `feat/test-db` | `e6eea78` isolated test database | 134 | |
+    | 13 | `feat/memory-service` | `19bdffb` T06 memory, dedup, undo | 912 | over 400; one service with its tests |
+    | 14 | `feat/agent-loop` | `c4f0753` T06 agent loop | 1,486 | over 400; the loop, tools and prompt log only work together; `size:exception` |
+    | 15 | `feat/chat-sse` | `fb07055` T06 SSE, plus `1ecdea8` verifier fix | 521 + 1,178 | over 400; the fix touches all three T06 units |
 
   - The next task branches from the top of the stack.
 
@@ -162,7 +166,7 @@ The parent passes the task, this document and the verification commands to every
   - Durable storage, with an acknowledgement only after the write.
   - Voice is transcribed with Groq; photos get OCR.
 - [x] T05 Embeddings with Voyage, and hybrid search (FTS, vector and trigram, combined with RRF) with a relevance threshold. Delegated. Commits `9bf11b0`, `8f42dc5`, `77c2610`.
-- [ ] T06 Agent turn. Delegated.
+- [x] T06 Agent turn. Delegated. Commits `e6eea78`, `19bdffb`, `c4f0753`, `fb07055`, `1ecdea8`.
   - Pre-search hints.
   - Haiku 5.5 with tools: open topic, search, remember with dedup, update rule, undo.
   - SSE chat API with citations to source entries.
@@ -265,6 +269,18 @@ The parent passes the task, this document and the verification commands to every
   - **Voyage limit:** the account has no payment method, so it is capped at 3 requests/min and 10K tokens/min. The free 200M tokens still apply after adding one. The pre-search degrades to lexical-only on a 429; the embed jobs retry.
   - Assessment: medium. Writer self-check plus parent spot check: tests 150/150, typecheck/lint/build 0.
   - Open: a photo without OCR text or caption never gets an embedding (revisit in T07). Embed failures have no app-visible status.
+- **T06.**
+  - **Memory service.** `rememberFact` finds similar live memories, then a Haiku judge with a structured tool decides ADD, UPDATE (supersede) or NOOP. An UPDATE that names a memory not offered as a candidate is downgraded to ADD. `updateRule`. Every mutation is written to `change_log`, grouped by turn id. `undoTurn` and `undoLast` are idempotent. Topics are created on demand and are not undone.
+  - **Agent loop.** `claude-haiku-5-5`, adaptive thinking, effort `low` (`AGENT_EFFORT`), `tool_choice` auto, at most 8 iterations. Tools: `open_topic` (50 most recent), `search`, `remember`, `update_rule`, `undo`.
+  - **Prompt.** The system prompt is static English with a cache breakpoint. The volatile block holds topic names, threshold-passing hints and the Buenos Aires date. It is sent but not persisted.
+  - **Citations.** Hints and tool results get `#n` refs. `[#n]` in the answer maps to entry ids.
+  - **Limits.** The token budget is 90K, checked before every call. Over budget, the next call goes without tools. History is trimmed by whole exchanges. Tool results are capped at 4,000 chars and 1,500 per hit.
+  - **Prompt log.** `agent_runs` stores each call's request JSON, usage, cost and latency, so criterion 4 can be audited.
+  - **SSE API.** `POST /v1/chat` (text, `entryId` or multipart) streams `text`, `tool`, `citations`, `done` and `error`. Errors are generic over SSE. Turns are serialized with an in-process mutex. Also `POST /v1/chat/undo` and `GET /v1/chat/history`.
+  - **Tests** run on an isolated `bitacora_test` database with file parallelism off. They used to pollute the dev DB and one was flaky. Tests 197/197 on three runs; lint has 0 warnings.
+  - Assessment: high (`hot_path`, `process_boundary`). The independent verifier first failed it with 2 blockers (orphan `tool_result` after trimming; thinking blocks dropped on replay), 2 majors (no budget check inside the loop; unvalidated supersede target) and 2 minors (raw error over SSE; concurrent turns). One scoped correction, `1ecdea8`. Re-verification: pass with notes.
+  - The parent closed both notes against the live API on 2026-10-22. `tools: []` with `tool_choice` auto after a `tool_use` history is accepted, and a real thinking block replayed in a later turn is accepted.
+  - Real smoke run: "Estudio Ingeniería en Sistemas en la UTN" called `remember` and got a voseo answer. A turn of two calls used about 700 input tokens, with 1,370 read from cache.
 - **Pivot (rev 4).** The plan changed:
   - It moved to the chat-and-memory focus.
   - The Telegram option was rejected.
@@ -275,6 +291,6 @@ The parent passes the task, this document and the verification commands to every
 
 ## Next step
 
-1. Start T06 (agent turn) on a new branch stacked on `feat/hybrid-search`.
+1. Start T08 (nightly consolidation and daily rollup) on a new branch stacked on `feat/chat-sse`. T07 needs the owner's real screenshots.
 2. The owner adds a payment method in Voyage to lift the 3 RPM limit (free tokens still apply).
 3. The owner rotates the three API keys when convenient, because they were pasted in chat.
