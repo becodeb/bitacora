@@ -128,7 +128,8 @@ Out:
     | 2 | `feat/transcription-port` | `d59007e` T02 port | 577 | over 400; types, errors and helpers only make sense together |
     | 3 | `feat/transcription-assemblyai` | `d53a98c` T02 | 442 | about 400 with fixtures |
     | 4 | `feat/transcription-speechmatics` | `3bebec5` T02 | 821 | over 400; 151 lines are fixtures, rest is one adapter |
-    | 5 | `feat/transcription-groq` | `f38a258` T02 | 254 | |
+    | 5 | `feat/transcription-groq` | `f38a258` T02 | 254 | plus `81ec9f4` doc update |
+    | 6 | `feat/data-model` | `3ddbdc5` T03 | 286 + ~1,100 generated snapshots | |
 
   - The next task branches from the top of the stack.
 
@@ -145,7 +146,7 @@ The parent passes the task, this document and the verification commands to every
 
 - [x] T01 Server scaffold. Delegated. Commit `9dc454e`.
 - [x] T02 Transcription port and adapters for AssemblyAI, Speechmatics and Groq. Delegated. Commits `d59007e`, `d53a98c`, `3bebec5`, `f38a258`.
-- [ ] T03 Data model and migrations. Delegated.
+- [x] T03 Data model and migrations. Delegated. Commit `3ddbdc5`.
   - Entries (the raw log) and attachments.
   - Topics, memories (with validity and `supersedes`) and rules.
   - Change log and chat messages.
@@ -226,6 +227,14 @@ The parent passes the task, this document and the verification commands to every
     - the Groq prompt is capped at 224 tokens;
     - Groq has no `aac`, so recordings use `.m4a`.
 - **Commits (2026-10-22).** Stacked PRs to main chosen. T01 and T02 committed as five stacked branches. Each branch passes typecheck, lint and tests on its own (23, 41, 46, 61 and 65 tests).
+- **T03.**
+  - Eight tables: `entries`, `attachments`, `topics`, `memories`, `rules`, `change_log`, `chat_messages`, `daily_rollups`.
+  - UUID keys; `vector(1024)` embeddings with HNSW cosine on entries, memories and topics; generated `spanish` tsvector with GIN; `gin_trgm_ops` on text.
+  - FK rules: attachments cascade with their entry; memories `restrict` the entry they cite, so the raw log cannot lose cited rows; topic and supersede links set null.
+  - `entries.text_body` holds the OCR text or transcript; `attachments.derived_text_status` tracks the async step.
+  - Spanish stemming does not unify "examen"/"exámenes"; trigram search covers that.
+  - Assessment: medium. RDD off, so writer self-check plus parent spot check: migrate OK, tests 75/75, typecheck/lint/build 0.
+  - Open: `rules.key` is unique across topics. Revisit in T06 if a rule needs per-topic variants. HNSW is not exercised until T05.
 - **Pivot (rev 4).** The plan changed:
   - It moved to the chat-and-memory focus.
   - The Telegram option was rejected.
@@ -236,5 +245,5 @@ The parent passes the task, this document and the verification commands to every
 
 ## Next step
 
-1. Start T03 on a new branch stacked on `feat/transcription-groq`.
-2. The owner adds the keys file for T04–T06.
+1. The owner adds `~/.credentials/bitacora.env` (blocks T04–T06).
+2. Start T04 on a new branch stacked on `feat/data-model`.
