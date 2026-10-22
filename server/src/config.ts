@@ -19,6 +19,14 @@ const envSchema = z.object({
   // (T05). Required for the same reason as GROQ_API_KEY: the embed
   // worker runs in this same process.
   VOYAGE_API_KEY: z.string().trim().min(1, "VOYAGE_API_KEY is required"),
+  // Anthropic, used by the agent turn (T06: the Haiku 5.5 tool loop and
+  // the memory judge). Required for the same reason as GROQ_API_KEY/
+  // VOYAGE_API_KEY: `POST /v1/chat` runs in this same process.
+  ANTHROPIC_API_KEY: z.string().trim().min(1, "ANTHROPIC_API_KEY is required"),
+  // How much reasoning effort Haiku 5.5 spends per agent-turn call (see
+  // `agent/claude-client.ts`'s `output_config.effort`). Defaults to the
+  // cheapest tier; raise it only if turn quality needs it.
+  AGENT_EFFORT: z.enum(["low", "medium", "high", "xhigh", "max"]).default("low"),
   // Directory where attachment files (photos, voice notes) are stored.
   // Relative paths resolve against the process's current working
   // directory. Gitignored; never committed.

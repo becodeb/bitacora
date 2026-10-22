@@ -1,7 +1,9 @@
 import { Hono } from "hono";
+import type { AgentTurnDeps } from "../agent/run-turn.js";
 import type { IngestDeps } from "../ingestion/entries.js";
 import { withTimeout } from "../lib/with-timeout.js";
 import { bearerAuth } from "./auth.js";
+import { createChatRouter } from "./chat.js";
 import { createEntriesRouter } from "./entries.js";
 
 /**
@@ -20,6 +22,8 @@ export interface AppDeps {
   appToken: string;
   /** Shared with the pg-boss derivation workers (see `jobs/`); used by `POST /v1/entries`. */
   ingest: IngestDeps;
+  /** Used by `POST /v1/chat` (see `agent/run-turn.ts`). */
+  agent: AgentTurnDeps;
 }
 
 /**
@@ -49,6 +53,7 @@ export function createApp(deps: AppDeps): Hono {
   v1.get("/me", (c) => c.json({ ok: true }, 200));
 
   v1.route("/entries", createEntriesRouter(deps.ingest));
+  v1.route("/chat", createChatRouter({ ingest: deps.ingest, agent: deps.agent }));
 
   app.route("/v1", v1);
 

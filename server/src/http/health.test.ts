@@ -1,5 +1,6 @@
 import { Pool } from "pg";
 import { afterAll, describe, expect, it } from "vitest";
+import { createStubAgentDeps } from "../agent/test-helpers.js";
 import { checkDb } from "../db/client.js";
 import { createStubIngestDeps } from "../ingestion/test-helpers.js";
 import { createApp } from "./app.js";
@@ -15,6 +16,7 @@ describe("GET /health", () => {
       appToken: "irrelevant-for-this-test",
       checkDb: async () => false,
       ingest: createStubIngestDeps(),
+      agent: createStubAgentDeps(),
     });
 
     const res = await app.request("/health");
@@ -32,6 +34,7 @@ describe("GET /health", () => {
           // touching the network or a real database.
         }),
       ingest: createStubIngestDeps(),
+      agent: createStubAgentDeps(),
     });
 
     const startedAt = Date.now();
@@ -55,6 +58,7 @@ describe("GET /health", () => {
         appToken: "irrelevant-for-this-test",
         checkDb: () => checkDb(pool),
         ingest: createStubIngestDeps(),
+        agent: createStubAgentDeps(),
       });
 
       const res = await app.request("/health");

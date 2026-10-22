@@ -1,4 +1,6 @@
 import { serve } from "@hono/node-server";
+import { createAnthropicClaudeClient } from "./agent/claude-client.js";
+import type { AgentTurnDeps } from "./agent/run-turn.js";
 import { type Config, loadConfig } from "./config.js";
 import { checkDb, createDb } from "./db/client.js";
 import { createVoyageEmbedder } from "./embeddings/voyage.js";
@@ -8,7 +10,9 @@ import { createBoss, startBoss } from "./jobs/boss.js";
 import { registerEmbedWorker } from "./jobs/embed.js";
 import { registerPhotoOcrWorker } from "./jobs/photo-ocr.js";
 import { registerVoiceTranscribeWorker } from "./jobs/voice-transcribe.js";
+import { createClaudeMemoryJudge } from "./memory/claude-judge.js";
 import { createPlaceholderOcr } from "./ocr/placeholder.js";
+import { createHybridSearch } from "./search/hybrid-search.js";
 import { createFileAttachmentStorage } from "./storage/attachment-storage.js";
 import { createGroqTranscriber } from "./transcription/groq.js";
 
@@ -34,6 +38,7 @@ async function main(): Promise<void> {
 
   const { pool, orm } = createDb(config.DATABASE_URL);
   const storage = createFileAttachmentStorage(config.DATA_DIR);
+  const embedder = createVoyageEmbedder({ apiKey: config.VOYAGE_API_KEY });
 
   // Shares one Postgres connection string with `pool` above, but keeps
   // its own internal pool: pg-boss manages its own `pgboss` schema and
@@ -52,15 +57,28 @@ async function main(): Promise<void> {
     boss,
   });
   await registerPhotoOcrWorker(boss, { db: orm, storage, ocr: createPlaceholderOcr(), boss });
-  await registerEmbedWorker(boss, {
+  await registerEmbedWorker(boss, { db: orm, embedder });
+
+  const search = createHybridSearch({ db: orm, embedder });
+  const agent: AgentTurnDeps = {
     db: orm,
-    embedder: createVoyageEmbedder({ apiKey: config.VOYAGE_API_KEY }),
-  });
+    claudeClient: createAnthropicClaudeClient({ apiKey: config.ANTHROPIC_API_KEY }),
+    hybridSearch: search.hybridSearch,
+    findHints: search.findHints,
+    memory: {
+      db: orm,
+      boss,
+      embedder,
+      judge: createClaudeMemoryJudge({ apiKey: config.ANTHROPIC_API_KEY }),
+    },
+    effort: config.AGENT_EFFORT,
+  };
 
   const app = createApp({
     appToken: config.APP_TOKEN,
     checkDb: () => checkDb(pool),
     ingest,
+    agent,
   });
 
   const server = serve({ fetch: app.fetch, port: config.PORT }, (info) => {

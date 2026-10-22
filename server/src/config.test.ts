@@ -7,6 +7,7 @@ const validEnv = {
   PORT: "3000",
   GROQ_API_KEY: "a-fake-groq-key",
   VOYAGE_API_KEY: "a-fake-voyage-key",
+  ANTHROPIC_API_KEY: "a-fake-anthropic-key",
   DATA_DIR: "./data",
 };
 
@@ -20,6 +21,8 @@ describe("loadConfig", () => {
       PORT: 3000,
       GROQ_API_KEY: validEnv.GROQ_API_KEY,
       VOYAGE_API_KEY: validEnv.VOYAGE_API_KEY,
+      ANTHROPIC_API_KEY: validEnv.ANTHROPIC_API_KEY,
+      AGENT_EFFORT: "low",
       DATA_DIR: validEnv.DATA_DIR,
     });
   });
@@ -48,6 +51,21 @@ describe("loadConfig", () => {
     const { VOYAGE_API_KEY, ...rest } = validEnv;
 
     expect(() => loadConfig(rest)).toThrowError(/VOYAGE_API_KEY/);
+  });
+
+  it("rejects a missing ANTHROPIC_API_KEY", () => {
+    const { ANTHROPIC_API_KEY, ...rest } = validEnv;
+
+    expect(() => loadConfig(rest)).toThrowError(/ANTHROPIC_API_KEY/);
+  });
+
+  it("defaults AGENT_EFFORT to low when absent", () => {
+    const config = loadConfig(validEnv);
+    expect(config.AGENT_EFFORT).toBe("low");
+  });
+
+  it("rejects an invalid AGENT_EFFORT", () => {
+    expect(() => loadConfig({ ...validEnv, AGENT_EFFORT: "extreme" })).toThrowError();
   });
 
   it("rejects a missing DATABASE_URL", () => {

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { sql } from "drizzle-orm";
 import { PgBoss } from "pg-boss";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { createStubAgentDeps } from "../agent/test-helpers.js";
 import { createDb } from "../db/client.js";
 import { attachments, entries } from "../db/schema.js";
 import type { IngestDeps } from "../ingestion/entries.js";
@@ -53,7 +54,12 @@ afterEach(async () => {
 });
 
 function buildApp() {
-  return createApp({ appToken: APP_TOKEN, checkDb: async () => true, ingest });
+  return createApp({
+    appToken: APP_TOKEN,
+    checkDb: async () => true,
+    ingest,
+    agent: createStubAgentDeps(),
+  });
 }
 
 const authHeaders = { Authorization: `Bearer ${APP_TOKEN}` };
