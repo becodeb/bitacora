@@ -103,7 +103,7 @@ Out:
 
 | When | Input |
 |---|---|
-| Now | `~/.credentials/bitacora.env` with `ANTHROPIC_API_KEY`, `GROQ_API_KEY` and `VOYAGE_API_KEY`. The owner creates it; keys never go in chat. |
+| Done | `~/.credentials/bitacora.env` with `ANTHROPIC_API_KEY`, `GROQ_API_KEY` and `VOYAGE_API_KEY`. All three answered 200 on 2026-10-22. |
 | T10 | An Expo account. |
 | T11 | Authorization to create the GitHub repo, push and deploy. |
 | T12 | A Google Cloud project for OAuth. Publish it to "Production", because tokens expire after 7 days in Testing. |
@@ -129,7 +129,10 @@ Out:
     | 3 | `feat/transcription-assemblyai` | `d53a98c` T02 | 442 | about 400 with fixtures |
     | 4 | `feat/transcription-speechmatics` | `3bebec5` T02 | 821 | over 400; 151 lines are fixtures, rest is one adapter |
     | 5 | `feat/transcription-groq` | `f38a258` T02 | 254 | plus `81ec9f4` doc update |
-    | 6 | `feat/data-model` | `3ddbdc5` T03 | 286 + ~1,100 generated snapshots | |
+    | 6 | `feat/data-model` | `3ddbdc5` T03 | 286 + ~1,100 generated snapshots | plus `a0f5b7f` doc update |
+    | 7 | `feat/ingestion-store` | `566fe88` T04 storage | 537 | over 400; schema change, storage and ingestion only work together |
+    | 8 | `feat/derivation-jobs` | `344ed7c` T04 jobs | 674 | over 400; half is tests |
+    | 9 | `feat/entries-http` | `3d58234` T04 HTTP, plus the body-limit fix | 484 + fix | |
 
   - The next task branches from the top of the stack.
 
@@ -151,7 +154,7 @@ The parent passes the task, this document and the verification commands to every
   - Topics, memories (with validity and `supersedes`) and rules.
   - Change log and chat messages.
   - Extensions: pgvector and `pg_trgm`, plus Spanish FTS indexes.
-- [ ] T04 Ingestion API. Delegated.
+- [x] T04 Ingestion API. Delegated. Commits `566fe88`, `344ed7c`, `3d58234`, plus the body-limit fix.
   - Post text, photo or voice.
   - Durable storage, with an acknowledgement only after the write.
   - Voice is transcribed with Groq; photos get OCR.
@@ -235,6 +238,18 @@ The parent passes the task, this document and the verification commands to every
   - Spanish stemming does not unify "examen"/"exámenes"; trigram search covers that.
   - Assessment: medium. RDD off, so writer self-check plus parent spot check: migrate OK, tests 75/75, typecheck/lint/build 0.
   - Open: `rules.key` is unique across topics. Revisit in T06 if a rule needs per-topic variants. HNSW is not exercised until T05.
+- **T04.**
+  - `POST /v1/entries` takes JSON text or multipart (`file` plus an optional `caption`, or `text`). `GET /v1/entries/:id` returns the entry and its derived-text status.
+  - The file is written with fsync first. The entry row, the attachment row and the pg-boss job then commit in one transaction (`fromDrizzle`). The 201 is sent after that. On a DB failure the file is removed.
+  - New column `entries.derived_text`, written once (`WHERE derived_text IS NULL`). `text_body` is only what the owner typed. The tsvector covers both.
+  - Queues `voice-transcription` and `photo-ocr`: 3 retries, 30 s with backoff. The status becomes `failed` only on the last attempt.
+  - OCR is a placeholder until T07. Photos end in status `not_available`.
+  - Limits: photos 15 MiB, audio 25 MiB, whole body 26 MiB (checked while streaming). Files are named by UUID.
+  - Assessment: high (`hot_path`). RDD off, so an independent verifier ran. Verdict: pass with notes. One scoped correction: a `bodyLimit` middleware before `parseBody`, which used to buffer bodies of any size.
+  - Accepted note: the client's Content-Type is trusted without sniffing. This is low risk for a single user.
+  - Real smoke run with the Groq key: a Spanish voice note was transcribed correctly ("El examen de análisis es el martes 12 de noviembre."). The sha256 matched.
+  - Results: tests 115/115, typecheck/lint/build 0. Each slice also passes alone (93, 102, 114).
+  - Keys: `~/.credentials/bitacora.env` exists (mode 600). The owner pasted the keys in chat, so rotating them is recommended.
 - **Pivot (rev 4).** The plan changed:
   - It moved to the chat-and-memory focus.
   - The Telegram option was rejected.
@@ -245,5 +260,5 @@ The parent passes the task, this document and the verification commands to every
 
 ## Next step
 
-1. The owner adds `~/.credentials/bitacora.env` (blocks T04–T06).
-2. Start T04 on a new branch stacked on `feat/data-model`.
+1. Start T05 (Voyage embeddings and hybrid search) on a new branch stacked on `feat/entries-http`.
+2. The owner rotates the three API keys when convenient, because they were pasted in chat.
