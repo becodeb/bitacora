@@ -32,7 +32,8 @@ npm run db:up
 # Copy the env template and fill in a real APP_TOKEN.
 cp .env.example .env
 
-# Apply database migrations (none yet — the data model lands in a later task).
+# Apply database migrations (enables the vector/pg_trgm extensions and
+# creates the entries/topics/memories/... tables from T03).
 npm run db:migrate
 
 # Run the server with live reload.
