@@ -56,21 +56,107 @@ describe("hybridSearch: FTS ranker", () => {
 });
 
 describe("hybridSearch: trigram ranker", () => {
-  it("finds a misspelled query via trigram similarity, with no FTS match", async () => {
+  it("finds a misspelled single-word query via word_similarity, with no FTS match", async () => {
     await withRollback(async (tx) => {
-      await tx.insert(entries).values({ kind: "text", textBody: "Examen de Análisis el martes." });
+      await tx.insert(entries).values({ kind: "text", textBody: "Análisis" });
       const search = createHybridSearch({ db: tx, embedder: createFakeEmbedder() });
 
-      // "analsis" (missing one letter) never appears in the stored
-      // text's tsvector, so websearch_to_tsquery's implicit AND across
-      // "examen", "analsis" and "martes" cannot match via FTS — this
-      // hit, if found, must come from trigram similarity alone.
-      const hits = await search.findHints("examen de analsis el martes", { scopes: ["entries"] });
+      // "analsis" (missing one letter) stems to a lexeme that never
+      // appears in "Análisis"'s own tsvector, so FTS's `@@` finds no
+      // candidate row at all — this hit, if found, must come from
+      // word_similarity alone. Measured on the dev DB (2026-10-22):
+      // word_similarity('analsis', unaccent(lower('Análisis'))) = 0.545.
+      const hits = await search.findHints("analsis", { scopes: ["entries"] });
 
       expect(hits).toHaveLength(1);
       expect(hits[0]?.signals.fts.matched).toBe(false);
       expect(hits[0]?.signals.trigram.matched).toBe(true);
+      expect(hits[0]?.signals.trigram.score).toBeCloseTo(0.545, 2);
       expect(hits[0]?.passesThreshold).toBe(true);
+    });
+  });
+
+  it("ranks a full natural-language sentence lexically, but neither lexical ranker passes the threshold alone", async () => {
+    await withRollback(async (tx) => {
+      await tx.insert(entries).values({ kind: "text", textBody: "Análisis" });
+      const search = createHybridSearch({ db: tx, embedder: createFakeEmbedder() });
+
+      // T06's pre-search query is the owner's whole message. This
+      // sentence shares only one lexeme/word with "Análisis"
+      // ("análisis" itself) out of five total ("che", "cuando",
+      // "rindo", "final", "análisis"), so neither FTS's
+      // ftsMinMatchedLexemesCap (2) nor trigram's
+      // trigramMinMatchedWordsCap (2) is met — a single shared word is
+      // exactly the over-permissive case both caps exist to reject. In
+      // production this sentence is the vector ranker's job instead: a
+      // real voyage-3.5 similarity check for "cuándo rindo análisis" vs
+      // "El examen de Análisis es el martes 12 de noviembre" measured
+      // 0.524 (2026-10-22), above vectorSimilarityMin (0.5). Here, with
+      // the fake embedder, the hit is still ranked (both rankers'
+      // candidate-selection SQL keeps it) but does not pass.
+      const hits = await search.hybridSearch({
+        query: "che, ¿cuándo rindo el final de análisis?",
+        scopes: ["entries"],
+      });
+
+      expect(hits).toHaveLength(1);
+      expect(hits[0]?.signals.fts.matched).toBe(false);
+      expect(hits[0]?.signals.trigram.matched).toBe(false);
+      expect(hits[0]?.signals.trigram.score).toBeCloseTo(1, 5);
+      expect(hits[0]?.signals.trigram.matchedCount).toBe(1);
+      expect(hits[0]?.passesThreshold).toBe(false);
+    });
+  });
+
+  it("does not pass the threshold on a single shared word, even at similarity 1.0 ('mañana')", async () => {
+    await withRollback(async (tx) => {
+      await tx.insert(entries).values({ kind: "text", textBody: "Mañana llueve." });
+      const search = createHybridSearch({ db: tx, embedder: createFakeEmbedder() });
+
+      // "mañana" is an exact substring (word_similarity 1.0), but
+      // "tengo" and "turno" score 0 against "Mañana llueve." (measured
+      // on the dev DB, 2026-10-22) — only 1 of 3 trigram-eligible words
+      // matches, below trigramMinMatchedWordsCap's min(2, 3) = 2. This
+      // is the motivating case: without the cap, any message containing
+      // "mañana" would pass against this entry regardless of the rest.
+      const hits = await search.findHints("mañana tengo turno", { scopes: ["entries"] });
+
+      expect(hits).toHaveLength(0);
+    });
+  });
+
+  it("passes the threshold when two distinct words each clear the trigram bar", async () => {
+    await withRollback(async (tx) => {
+      await tx.insert(entries).values({
+        kind: "text",
+        textBody: "El examen de Análisis es el martes 12 de noviembre.",
+      });
+      const search = createHybridSearch({ db: tx, embedder: createFakeEmbedder() });
+
+      // "examen" (exact, 1.0) and "analsis" (typo, 0.545) both clear
+      // trigramSimilarityMin (measured on the dev DB, 2026-10-22) — 2
+      // of 2 trigram-eligible words, meeting min(2, 2) = 2.
+      const hits = await search.findHints("examen analsis", { scopes: ["entries"] });
+
+      expect(hits).toHaveLength(1);
+      expect(hits[0]?.signals.trigram.matched).toBe(true);
+      expect(hits[0]?.signals.trigram.matchedCount).toBe(2);
+      expect(hits[0]?.passesThreshold).toBe(true);
+    });
+  });
+});
+
+describe("hybridSearch: all-stopword message", () => {
+  it("returns no FTS hits, without erroring, for a message with no lexemes", async () => {
+    await withRollback(async (tx) => {
+      await tx.insert(entries).values({ kind: "text", textBody: "Compra leche y pan." });
+      const search = createHybridSearch({ db: tx, embedder: createFakeEmbedder() });
+
+      // "de la el en" is entirely Spanish stopwords: to_tsvector('spanish', ...)
+      // yields zero lexemes, which must not blow up to_tsquery.
+      const hits = await search.hybridSearch({ query: "de la el en", scopes: ["entries"] });
+
+      expect(hits.filter((hit) => hit.signals.fts.matched)).toHaveLength(0);
     });
   });
 });
@@ -175,6 +261,33 @@ describe("hybridSearch: relevance threshold", () => {
       const search = createHybridSearch({ db: tx, embedder: createFakeEmbedder() });
 
       const hits = await search.findHints("vuelo a marte en un cohete", { scopes: ["entries"] });
+
+      expect(hits).toHaveLength(0);
+    });
+  });
+
+  it("does not pass the threshold when the only shared word is a stopword", async () => {
+    await withRollback(async (tx) => {
+      const [entry] = await tx
+        .insert(entries)
+        .values({ kind: "text", textBody: "El examen es el martes." })
+        .returning({ id: entries.id });
+      if (!entry) throw new Error("insert did not return a row");
+      await tx
+        .insert(memories)
+        .values({ content: "El examen es el martes.", sourceEntryId: entry.id });
+
+      const search = createHybridSearch({ db: tx, embedder: createFakeEmbedder() });
+
+      // Shares only "el" with the memory ("El examen es el martes.") —
+      // a Spanish stopword, removed from both sides' tsvectors, and too
+      // short (2 chars) for the trigram word list. Every other word
+      // ("vos", "armaste", "mesa", "jueves") is unrelated: measured
+      // word_similarity against "El examen es el martes." tops out at
+      // 0.2 ("mesa"), well under trigramSimilarityMin (0.5).
+      const hits = await search.findHints("¿vos armaste la mesa el jueves?", {
+        scopes: ["memories"],
+      });
 
       expect(hits).toHaveLength(0);
     });

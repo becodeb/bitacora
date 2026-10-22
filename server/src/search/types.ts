@@ -24,6 +24,16 @@ export interface RankerSignal {
   rank?: number;
   /** ts_rank_cd for FTS, cosine similarity (1 - cosine distance) for vector, pg_trgm similarity for trigram. Absent when `matched` is false. */
   score?: number;
+  /**
+   * Debug/logging field: for `fts`, how many distinct query lexemes
+   * this hit's search_vector shared with the query; for `trigram`, how
+   * many distinct query words individually cleared
+   * `trigramSimilarityMin` against this hit's text. Compared against
+   * `ftsMinMatchedLexemesCap`/`trigramMinMatchedWordsCap` to decide
+   * `matched` — see `hybrid-search.ts`'s `buildHit`. Absent for
+   * `vector`, and for an unmatched signal.
+   */
+  matchedCount?: number;
 }
 
 export interface HybridSearchHit {
