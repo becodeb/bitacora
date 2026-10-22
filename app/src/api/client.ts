@@ -5,6 +5,13 @@ import {
   type ChatHistoryResponse,
   type ChatStreamEvent,
   type EntryResponse,
+  type MeChangesResponse,
+  type MeMemoriesResponse,
+  type MeMutationResponse,
+  type MeRulesResponse,
+  type MeTopicDetailResponse,
+  type MeTopicsResponse,
+  type MeUndoResponse,
   NetworkError,
   type UndoResponse,
 } from "./types";
@@ -150,6 +157,149 @@ export class ApiClient {
       body: JSON.stringify({ entryId }),
     });
     await this.consumeOrThrow(response, onEvent);
+  }
+
+  /**
+   * Sends a photo or voice attachment (with an optional caption) as a
+   * chat turn, multipart — same field names `server/src/http/chat.ts`
+   * expects for its own `resolveEntryId` multipart branch: `file` and,
+   * when present, `caption`. Streams the answer exactly like
+   * `sendTextMessage`.
+   */
+  async sendAttachmentMessage(
+    attachment: { uri: string; mimeType: string; fileName: string },
+    caption: string | undefined,
+    onEvent: (event: ChatStreamEvent) => void,
+  ): Promise<void> {
+    const form = new FormData();
+    // React Native's FormData accepts this `{ uri, name, type }` shape
+    // for a file part — not a real `Blob`/`File` — and `expo/fetch`
+    // honors it the same way `fetch` does elsewhere in the app.
+    form.append(
+      "file",
+      {
+        uri: attachment.uri,
+        name: attachment.fileName,
+        type: attachment.mimeType,
+      } as unknown as Blob,
+      attachment.fileName,
+    );
+    if (caption && caption.trim().length > 0) {
+      form.append("caption", caption.trim());
+    }
+
+    const response = await guardedFetch(`${this.baseUrl}/v1/chat`, {
+      method: "POST",
+      headers: this.authHeaders({ accept: "text/event-stream" }),
+      body: form as unknown as BodyInit,
+    });
+    await this.consumeOrThrow(response, onEvent);
+  }
+
+  // --- "What I know about you" (server/src/http/me.ts, T10 work unit (c)) ---
+
+  async getTopics(): Promise<MeTopicsResponse> {
+    const response = await guardedFetch(`${this.baseUrl}/v1/me/topics`, {
+      method: "GET",
+      headers: this.authHeaders(),
+    });
+    return parseJsonOrThrow<MeTopicsResponse>(response);
+  }
+
+  async getTopic(topicId: string): Promise<MeTopicDetailResponse> {
+    const response = await guardedFetch(`${this.baseUrl}/v1/me/topics/${topicId}`, {
+      method: "GET",
+      headers: this.authHeaders(),
+    });
+    return parseJsonOrThrow<MeTopicDetailResponse>(response);
+  }
+
+  async renameTopic(
+    topicId: string,
+    patch: { name?: string; description?: string | null },
+  ): Promise<MeMutationResponse> {
+    const response = await guardedFetch(`${this.baseUrl}/v1/me/topics/${topicId}`, {
+      method: "PATCH",
+      headers: this.authHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify(patch),
+    });
+    return parseJsonOrThrow<MeMutationResponse>(response);
+  }
+
+  async getMemoriesWithoutTopic(): Promise<MeMemoriesResponse> {
+    const response = await guardedFetch(`${this.baseUrl}/v1/me/memories?topicId=none`, {
+      method: "GET",
+      headers: this.authHeaders(),
+    });
+    return parseJsonOrThrow<MeMemoriesResponse>(response);
+  }
+
+  async correctMemoryContent(memoryId: string, content: string): Promise<MeMutationResponse> {
+    const response = await guardedFetch(`${this.baseUrl}/v1/me/memories/${memoryId}`, {
+      method: "PATCH",
+      headers: this.authHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify({ content }),
+    });
+    return parseJsonOrThrow<MeMutationResponse>(response);
+  }
+
+  async moveMemoryTopic(memoryId: string, topicId: string | null): Promise<MeMutationResponse> {
+    const response = await guardedFetch(`${this.baseUrl}/v1/me/memories/${memoryId}`, {
+      method: "PATCH",
+      headers: this.authHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify({ topicId }),
+    });
+    return parseJsonOrThrow<MeMutationResponse>(response);
+  }
+
+  async deleteMemory(memoryId: string): Promise<MeMutationResponse> {
+    const response = await guardedFetch(`${this.baseUrl}/v1/me/memories/${memoryId}`, {
+      method: "DELETE",
+      headers: this.authHeaders(),
+    });
+    return parseJsonOrThrow<MeMutationResponse>(response);
+  }
+
+  async getRules(): Promise<MeRulesResponse> {
+    const response = await guardedFetch(`${this.baseUrl}/v1/me/rules`, {
+      method: "GET",
+      headers: this.authHeaders(),
+    });
+    return parseJsonOrThrow<MeRulesResponse>(response);
+  }
+
+  async putRule(key: string, payload: unknown, topicName?: string): Promise<MeMutationResponse> {
+    const response = await guardedFetch(`${this.baseUrl}/v1/me/rules/${encodeURIComponent(key)}`, {
+      method: "PUT",
+      headers: this.authHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify({ payload, topicName }),
+    });
+    return parseJsonOrThrow<MeMutationResponse>(response);
+  }
+
+  async deleteRule(key: string): Promise<MeMutationResponse> {
+    const response = await guardedFetch(`${this.baseUrl}/v1/me/rules/${encodeURIComponent(key)}`, {
+      method: "DELETE",
+      headers: this.authHeaders(),
+    });
+    return parseJsonOrThrow<MeMutationResponse>(response);
+  }
+
+  async getChanges(limit?: number): Promise<MeChangesResponse> {
+    const query = limit ? `?limit=${limit}` : "";
+    const response = await guardedFetch(`${this.baseUrl}/v1/me/changes${query}`, {
+      method: "GET",
+      headers: this.authHeaders(),
+    });
+    return parseJsonOrThrow<MeChangesResponse>(response);
+  }
+
+  async undoChangeGroup(groupId: string): Promise<MeUndoResponse> {
+    const response = await guardedFetch(`${this.baseUrl}/v1/me/changes/${groupId}/undo`, {
+      method: "POST",
+      headers: this.authHeaders(),
+    });
+    return parseJsonOrThrow<MeUndoResponse>(response);
   }
 
   private async consumeOrThrow(

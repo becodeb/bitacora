@@ -12,11 +12,9 @@ export interface UiMessage {
   text: string;
   /**
    * `ref` → source entry id, for `[#n]`-style citation markers found
-   * in `text`. Only ever populated for a message built live during
-   * this session (`citations` SSE events) — a message loaded from
-   * history has no citation mapping (the server does not persist
-   * one), so its `[#n]` markers render as plain text. See the T10
-   * writer report's "gaps" for why.
+   * in `text`. Populated either live during this session (`citations`
+   * SSE events) or from a reloaded history row's persisted
+   * `citations` column (see T10's work unit (a)).
    */
   citations: Record<string, string>;
   createdAt: string;

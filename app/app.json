@@ -18,7 +18,32 @@
       },
       "predictiveBackGestureEnabled": false
     },
-    "plugins": ["expo-router", "expo-secure-store", "expo-dev-client"],
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      "expo-dev-client",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Bitacora needs access to your photos to attach one to a message.",
+          "cameraPermission": "Bitacora needs access to your camera to attach a photo to a message."
+        }
+      ],
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Bitacora needs access to your microphone to record a voice note."
+        }
+      ],
+      [
+        "expo-share-intent",
+        {
+          "androidIntentFilters": ["text/*", "image/*"],
+          "disableIOS": true
+        }
+      ],
+      "expo-asset"
+    ],
     "experiments": {
       "typedRoutes": true
     }

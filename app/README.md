@@ -76,18 +76,63 @@ eas build --profile development --platform android  # dev client APK
 - `app/` — `expo-router` file-based routes (the Android screens).
 - `src/api/` — typed HTTP/SSE client for the server.
 - `src/features/settings/` — connection + language container (hook) and storage.
-- `src/features/chat/` — chat container (hook) and presentational components
+- `src/features/chat/` — chat container (hooks) and presentational components
   (atoms/molecules): `MessageBubble`, `Composer`, `CitationText`,
-  `CitationSheet`, `ToolActivityIndicator`, `UndoBar`.
+  `CitationSheet`, `ToolActivityIndicator`, `UndoBar`. `use-chat.ts` runs
+  text and attachment turns; `use-attachment-composer.ts` owns
+  photo/voice staging; `use-share-intent-staging.ts` feeds a shared
+  image/text from another app into the composer.
+- `src/features/about-you/` — the "What I know about you" tab's
+  containers (`use-topics.ts`, `use-topic-detail.ts`, `use-rules.ts`,
+  `use-changes.ts`) and presentational rows (`TopicRow`, `MemoryRow`,
+  `RuleRow`, `ChangeRow`, `TopicHeader`). Reuses the chat feature's
+  `CitationSheet`/`useCitationEntry` for a memory's source citation.
 - `src/i18n/` — English/Spanish dictionary and provider.
 - `src/theme/` — color/spacing/type tokens (light + dark).
 
 Native `android/`/`ios/` folders are intentionally not committed (Continuous
 Native Generation — `npx expo prebuild` regenerates them from `app.json`).
 
+## Permissions
+
+The app requests these Android permissions at runtime, only when the
+owner uses the feature that needs them (never on launch):
+
+- **Camera** (`android.permission.CAMERA`) — taking a photo to attach
+  (`expo-image-picker`'s `launchCameraAsync`).
+- **Photos/media library** (read access) — picking an existing photo
+  to attach (`expo-image-picker`'s `launchImageLibraryAsync`).
+- **Microphone** (`android.permission.RECORD_AUDIO`) — recording a
+  voice note (`expo-audio`). Both `expo-image-picker` and `expo-audio`
+  declare this permission (image-picker's own plugin adds it
+  unconditionally unless explicitly blocked); setting it to `false` on
+  `expo-image-picker` instead *blocks* the permission app-wide via a
+  manifest `tools:node="remove"`, which silently breaks voice
+  recording — do not do that; the harmless duplicate `<uses-permission>`
+  is the correct tradeoff (confirmed against the generated manifest,
+  see `app.json`'s `expo-image-picker`/`expo-audio` plugin config).
+
+None of this is requestable from Expo Go — see "Extension points"
+below.
+
+## Android share target ("Share with Bitacora")
+
+Sharing an image or plain text from another app (e.g. a screenshot
+from the gallery, or a link from a browser) opens Bitacora's chat tab
+with the content staged in the composer — the owner can add a caption
+and sending is still one explicit tap, never automatic (per
+`odd/tasks/mvp.md`'s "No confirmations" decision, read narrowly: the
+share itself is already one explicit owner action, so staging rather
+than auto-sending is the correct amount of friction).
+
+Implemented with `expo-share-intent` (`app/+native-intent.ts` routes
+the share to `/(tabs)/chat`; `src/features/chat/use-share-intent-staging.ts`
+stages it). **This only works in a dev or production build — never in
+Expo Go** (it needs a native module/config plugin), and only on
+Android (`disableIOS: true` in `app.json`; this project targets Android
+only per `odd/tasks/mvp.md`'s scope).
+
 ## Extension points (not implemented here)
 
-- Photo/voice attachments in the composer.
-- Android share target ("Share with Bitacora").
-- The "What I know about you" tab (`app/(tabs)/about-you.tsx` is a
-  placeholder route only).
+- Widgets (quick note, today) and reply-from-notification (stage 3,
+  T14/T15 — not T10's scope).

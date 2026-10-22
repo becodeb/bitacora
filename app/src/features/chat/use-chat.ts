@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ApiClient } from "../../api/client";
-import { ApiError, NetworkError } from "../../api/types";
+import { ApiError, type ChatStreamEvent, NetworkError } from "../../api/types";
+import type { StagedAttachment } from "./attachment-types";
 import { extractText, type UiMessage } from "./types";
 
 const PENDING_ASSISTANT_ID = "__pending__";
@@ -18,6 +19,7 @@ export interface ChatState {
 
 export interface ChatContainer extends ChatState {
   sendText: (text: string) => Promise<void>;
+  sendAttachment: (attachment: StagedAttachment, caption: string) => Promise<void>;
   undoLast: () => Promise<void>;
   dismissError: () => void;
   /** Whether the last message is an assistant turn, i.e. there is something an Undo could plausibly act on. */
@@ -55,7 +57,9 @@ export function useChatContainer(client: ApiClient | null): ChatContainer {
           id: row.id,
           role: row.role,
           text: extractText(row.content),
-          citations: {},
+          citations: Object.fromEntries(
+            (row.citations ?? []).map((citation) => [citation.ref, citation.sourceEntryId]),
+          ),
           createdAt: row.createdAt,
           pending: false,
         })),
@@ -73,16 +77,24 @@ export function useChatContainer(client: ApiClient | null): ChatContainer {
     // just saved and a client became available for the first time).
   }, [loadHistory]);
 
-  const sendText = useCallback(
-    async (text: string) => {
-      if (!client || text.trim().length === 0 || sending) {
-        return;
-      }
-
+  /**
+   * Shared turn-running logic for both a plain text message and an
+   * attachment message: stages the optimistic user/assistant pair,
+   * runs `startStream` (which already knows which `ApiClient` method
+   * to call), and folds its SSE events into `messages` state. `userText`
+   * is only what the UI shows for the user's own bubble — for an
+   * attachment this is the caption (or a placeholder), never the
+   * attachment bytes themselves.
+   */
+  const runTurn = useCallback(
+    async (
+      userText: string,
+      startStream: (onEvent: (event: ChatStreamEvent) => void) => Promise<void>,
+    ) => {
       const userMessage: UiMessage = {
         id: `local-${Date.now()}`,
         role: "user",
-        text,
+        text: userText,
         citations: {},
         createdAt: new Date().toISOString(),
         pending: false,
@@ -104,7 +116,7 @@ export function useChatContainer(client: ApiClient | null): ChatContainer {
       pendingCitations.current = {};
 
       try {
-        await client.sendTextMessage(text, (event) => {
+        await startStream((event) => {
           if (event.event === "text") {
             appendAssistantText(setMessages, event.data);
           } else if (event.event === "tool") {
@@ -140,7 +152,31 @@ export function useChatContainer(client: ApiClient | null): ChatContainer {
         setToolStatus(null);
       }
     },
-    [client, sending],
+    [],
+  );
+
+  const sendText = useCallback(
+    async (text: string) => {
+      if (!client || text.trim().length === 0 || sending) {
+        return;
+      }
+      await runTurn(text, (onEvent) => client.sendTextMessage(text, onEvent));
+    },
+    [client, sending, runTurn],
+  );
+
+  const sendAttachment = useCallback(
+    async (attachment: StagedAttachment, caption: string) => {
+      if (!client || sending) {
+        return;
+      }
+      const displayText =
+        caption.trim().length > 0 ? caption.trim() : attachment.kind === "photo" ? "📷" : "🎤";
+      await runTurn(displayText, (onEvent) =>
+        client.sendAttachmentMessage(attachment, caption, onEvent),
+      );
+    },
+    [client, sending, runTurn],
   );
 
   const undoLast = useCallback(async () => {
@@ -174,6 +210,7 @@ export function useChatContainer(client: ApiClient | null): ChatContainer {
     undoing,
     lastUndoResult,
     sendText,
+    sendAttachment,
     undoLast,
     dismissError,
     canUndo,

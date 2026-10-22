@@ -22,6 +22,8 @@ export interface ChatHistoryRow {
   role: AgentRole;
   content: AgentContentBlock[];
   entryId: string | null;
+  /** `[#n]` ref -> source entry id, persisted with the assistant message (see T10's work unit (a)). `null`/absent for a row with no citations, or any non-assistant row. */
+  citations: Array<{ ref: string; sourceEntryId: string }> | null;
   createdAt: string;
 }
 
@@ -97,6 +99,89 @@ export interface EntryView {
 export interface EntryResponse {
   ok: true;
   entry: EntryView;
+}
+
+/**
+ * Types mirroring `server/src/memory/owner-view.ts` and
+ * `server/src/http/me.ts`, behind the "What I know about you" tab
+ * (T10 work unit (c)).
+ */
+
+export interface TopicOverview {
+  id: string;
+  name: string;
+  description: string | null;
+  summary: string | null;
+  liveMemoryCount: number;
+  lastChangeAt: string;
+}
+
+export interface MemorySummary {
+  id: string;
+  content: string;
+  topicId: string | null;
+  sourceEntryId: string;
+  createdAt: string;
+  validFrom: string;
+}
+
+export interface RuleSummary {
+  key: string;
+  payload: unknown;
+  topicName: string | null;
+}
+
+export interface ChangeGroupSummary {
+  groupId: string;
+  source: "chat_turn" | "consolidation" | "manual_edit";
+  createdAt: string;
+  undone: boolean;
+  summary: string;
+}
+
+export interface MeTopicsResponse {
+  ok: true;
+  topics: TopicOverview[];
+}
+
+export interface MeTopicDetailResponse {
+  ok: true;
+  topic: TopicOverview;
+  memories: MemorySummary[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface MeMemoriesResponse {
+  ok: true;
+  memories: MemorySummary[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface MeRulesResponse {
+  ok: true;
+  rules: RuleSummary[];
+}
+
+export interface MeChangesResponse {
+  ok: true;
+  changes: ChangeGroupSummary[];
+}
+
+/** The common shape of every owner-made `/v1/me` mutation's response — each endpoint also adds its own fields (e.g. `topic`, `memoryId`), intentionally left untyped here since callers that need them read the response loosely. */
+export interface MeMutationResponse {
+  ok: true;
+  groupId: string;
+  [key: string]: unknown;
+}
+
+export interface MeUndoResponse {
+  ok: true;
+  turnId: string;
+  reverted: number;
 }
 
 export interface ApiErrorResponse {

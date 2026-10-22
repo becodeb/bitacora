@@ -40,6 +40,29 @@ describe("useChatContainer", () => {
     expect(result.current.messages[0]).toMatchObject({ role: "user", text: "hola" });
   });
 
+  it("maps a history row's persisted citations into the UiMessage citations record", async () => {
+    const client = fakeClient({
+      getChatHistory: jest.fn().mockResolvedValue({
+        ok: true,
+        messages: [
+          {
+            id: "m2",
+            role: "assistant",
+            content: [{ type: "text", text: "Estudiás Ingeniería en Sistemas [#1]." }],
+            entryId: null,
+            citations: [{ ref: "#1", sourceEntryId: "entry-123" }],
+            createdAt: "2026-10-22T00:00:00.000Z",
+          },
+        ],
+      }),
+    });
+
+    const { result } = await renderHook(() => useChatContainer(client));
+
+    await waitFor(() => expect(result.current.historyLoading).toBe(false));
+    expect(result.current.messages[0]?.citations).toEqual({ "#1": "entry-123" });
+  });
+
   it("does nothing when there is no configured client yet", async () => {
     const { result } = await renderHook(() => useChatContainer(null));
     await waitFor(() => expect(result.current.historyLoading).toBe(true));

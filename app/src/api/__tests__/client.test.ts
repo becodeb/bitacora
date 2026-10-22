@@ -97,6 +97,87 @@ describe("ApiClient", () => {
     ]);
   });
 
+  // `expo-expo`/jest's test environment's global `FormData` is a
+  // web-standard polyfill that insists a file part be a real `Blob`;
+  // React Native's own `FormData` (what `client.ts` actually runs
+  // against on-device — see its own comment) accepts the plain
+  // `{ uri, name, type }` shape with no such check. A fake standing in
+  // for RN's own polyfill lets these two tests check the client's
+  // choice of field names/shape without fighting that mismatch.
+  class FakeFormData {
+    parts: Array<[string, unknown]> = [];
+    append(key: string, value: unknown) {
+      this.parts.push([key, value]);
+    }
+    get(key: string) {
+      return this.parts.find(([k]) => k === key)?.[1] ?? null;
+    }
+  }
+
+  it("sendAttachmentMessage builds a multipart body with the 'file' and 'caption' fields the server expects", async () => {
+    const originalFormData = globalThis.FormData;
+    // @ts-expect-error -- test-only stand-in, see FakeFormData's doc above.
+    globalThis.FormData = FakeFormData;
+    try {
+      const sseBody =
+        'event: done\ndata: {"turnId":"t1","stopReason":"end_turn","usage":{},"derivationPending":false}\n\n';
+      mockFetch.mockResolvedValueOnce(
+        new Response(sseBody, { status: 200, headers: { "content-type": "text/event-stream" } }),
+      );
+      const client = new ApiClient({ baseUrl: "http://host:3000", token: "t" });
+
+      await client.sendAttachmentMessage(
+        { uri: "file:///photo.jpg", mimeType: "image/jpeg", fileName: "photo.jpg" },
+        "el examen es el martes",
+        () => {},
+      );
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe("http://host:3000/v1/chat");
+      expect(init.method).toBe("POST");
+      expect(init.body).toBeInstanceOf(FakeFormData);
+      const form = init.body as unknown as FakeFormData;
+      expect(form.get("file")).toMatchObject({
+        uri: "file:///photo.jpg",
+        name: "photo.jpg",
+        type: "image/jpeg",
+      });
+      expect(form.get("caption")).toBe("el examen es el martes");
+      // No manual content-type header: letting fetch set the multipart
+      // boundary itself is required for the server to parse the body.
+      expect((init.headers as Record<string, string>)["content-type"]).toBeUndefined();
+    } finally {
+      globalThis.FormData = originalFormData;
+    }
+  });
+
+  it("sendAttachmentMessage omits the 'caption' field when there is no caption text", async () => {
+    const originalFormData = globalThis.FormData;
+    // @ts-expect-error -- test-only stand-in, see FakeFormData's doc above.
+    globalThis.FormData = FakeFormData;
+    try {
+      mockFetch.mockResolvedValueOnce(
+        new Response(
+          'event: done\ndata: {"turnId":"t1","stopReason":"end_turn","usage":{},"derivationPending":false}\n\n',
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        ),
+      );
+      const client = new ApiClient({ baseUrl: "http://host:3000", token: "t" });
+
+      await client.sendAttachmentMessage(
+        { uri: "file:///note.m4a", mimeType: "audio/m4a", fileName: "note.m4a" },
+        "",
+        () => {},
+      );
+
+      const form = mockFetch.mock.calls[0][1].body as unknown as FakeFormData;
+      expect(form.get("caption")).toBeNull();
+    } finally {
+      globalThis.FormData = originalFormData;
+    }
+  });
+
   it("throws the JSON error body instead of opening the SSE decoder on a 4xx chat response", async () => {
     mockFetch.mockResolvedValueOnce(
       jsonResponse(400, { ok: false, error: "JSON body must include a non-empty 'text' string" }),
