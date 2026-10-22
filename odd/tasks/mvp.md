@@ -140,7 +140,14 @@ Out:
     | 13 | `feat/memory-service` | `19bdffb` T06 memory, dedup, undo | 912 | over 400; one service with its tests |
     | 14 | `feat/agent-loop` | `c4f0753` T06 agent loop | 1,486 | over 400; the loop, tools and prompt log only work together; `size:exception` |
     | 15 | `feat/chat-sse` | `fb07055` T06 SSE, plus `1ecdea8` verifier fix | 521 + 1,178 | over 400; the fix touches all three T06 units; plus `dbd1437` doc |
-    | 16 | `feat/consolidation` | `f7de017` T08, plus `63a522f` verifier fix | 2,056 + 834 | over 400; the scheduler and admin trigger register both jobs, so no cohesive split was found; `size:exception` |
+    | 16 | `feat/consolidation` | `f7de017` T08, plus `63a522f` verifier fix | 2,056 + 834 | over 400; the scheduler and admin trigger register both jobs, so no cohesive split was found; `size:exception`; plus `da9e8d8` doc |
+    | 17 | `feat/memory-corrections` | `7044151` T10 server: undoable manual edits | 659 | over 400; service with its tests |
+    | 18 | `feat/memory-api` | `cc21a73` T10 server: `/v1/me` | 931 | over 400; router with its tests |
+    | 19 | `feat/app-scaffold` | `0c0f1ab` T10 app scaffold, settings, i18n, API client | 1,967 (excl. lockfile) | over 400; scaffold |
+    | 20 | `feat/app-chat` | `93c9ab1` T10 chat screen | 1,242 | over 400; one screen with its components and tests |
+    | 21 | `feat/chat-citations` | `a1214c8` T10 server: citations in history | 81 | |
+    | 22 | `feat/app-attachments` | `0cfb1b8` T10 photo, voice, share target | 1,632 | over 400 |
+    | 23 | `feat/app-about-you` | `1fa15be` T10 "What I know about you" | 1,663 | over 400 |
 
   - The next task branches from the top of the stack.
 
@@ -176,7 +183,7 @@ The parent passes the task, this document and the verification commands to every
   - Decide whether OCR alone is enough, and when to fall back to vision.
 - [x] T08 Nightly consolidation and daily rollup job. Delegated. Commits `f7de017`, `63a522f`.
 - [ ] T09 Deploy to Coolify, with backups and secrets. Needs owner authorization (T11 row above).
-- [ ] T10 Expo app. Delegated.
+- [ ] T10 Expo app. Delegated. The code is done (commits `7044151`, `cc21a73`, `0c0f1ab`, `93c9ab1`, `a1214c8`, `0cfb1b8`, `1fa15be`). Still open: the EAS APK build (needs the owner's Expo account) and an on-device check.
   - Scaffold and EAS APK.
   - One-time token setup.
   - Chat screen: text, photo and voice, with streaming, Undo and citations.
@@ -294,6 +301,20 @@ The parent passes the task, this document and the verification commands to every
   - Assessment: high (`hot_path`). The verifier passed it with notes: one major (concurrent runs could merge twice) and two minors. One scoped correction, `63a522f`: advisory locks per job on a dedicated connection, `FOR UPDATE` on pairs, a capped summarizer input, and `stop_reason` `error`/`refusal` in `agent_runs`.
   - Real smoke run: three synthetic entries produced a correct diary with its pending items. Cost was USD 0.0001–0.0002 per rollup, and a re-run updates the row (no duplicate).
   - Results: tests 219/219, lint 0 warnings.
+- **T10 (code).**
+  - **Server.** `/v1/me` covers topics, memories, rules and changes. Corrections supersede the old memory; delete invalidates it; move and rename are logged updates. Every edit returns a `groupId` that can be undone. `change_log.source` is one of `chat_turn`, `consolidation` or `manual_edit`. Citations are now persisted with assistant messages.
+  - **App.** `app/`: Expo SDK 58, expo-router, Android only, Biome, jest-expo. The structure follows atomic design with container hooks and presentational components.
+    - Onboarding takes the server URL and token, validates them with `/health` and `/v1/me`, and stores them in secure-store.
+    - UI language: English by default, Spanish in settings.
+    - Chat streams SSE over `expo/fetch`, with citation chips (live and from history) and Undo.
+    - Photo (camera or gallery) and voice (`.m4a`, `expo-audio`) are sent as multipart.
+    - Share target through `expo-share-intent`: the shared content is staged in the composer and is not sent automatically.
+    - "What I know about you" has Topics (inline edit, move, delete, rename), Rules (JSON editor) and Changes (Undo per group).
+  - **Pitfall found with `expo prebuild`.** Setting `microphonePermission: false` in `expo-image-picker` removes `RECORD_AUDIO` for the whole app and breaks voice recording. It is left at its default.
+  - **arm64.** The Hermes compiler that Expo ships is x86-64, so `expo export` with bytecode fails on the Pi. `--no-bytecode` proves the bundle builds (about 1,200 modules). EAS cloud builders are not affected.
+  - Checks: app tsc 0, biome 0, jest 90/90, expo-doctor 20/20, `expo export --no-bytecode` OK, prebuild plugins resolve. Server 247/247.
+  - Assessments: medium. Writer self-check plus parent spot checks; each unit was verified on its own.
+  - Not verified on a device: the camera and gallery picker, real recording, and the share flow.
 - **Pivot (rev 4).** The plan changed:
   - It moved to the chat-and-memory focus.
   - The Telegram option was rejected.
@@ -304,6 +325,10 @@ The parent passes the task, this document and the verification commands to every
 
 ## Next step
 
-1. Start T10 (Expo app) on a new branch stacked on `feat/consolidation`. The scaffold and code need no account; the EAS APK build needs the owner's Expo account. T07 needs the owner's real screenshots.
+1. Owner-gated. Everything left in stage 1 needs the owner:
+   - **T07** needs real screenshots in `samples/` (gitignored).
+   - **T10** needs an Expo account to build the APK, then a device test.
+   - **T09/T11** need authorization to create the GitHub repo, push and deploy to Coolify.
+   - Stage 2 (T12) needs a Google Cloud OAuth project.
 2. The owner adds a payment method in Voyage to lift the 3 RPM limit (free tokens still apply).
 3. The owner rotates the three API keys when convenient, because they were pasted in chat.
