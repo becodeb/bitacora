@@ -1,0 +1,35 @@
+{
+  "task": "transcribe",
+  "language": "spanish",
+  "duration": 6.5,
+  "text": " Recordame comprar leche y llamar a mamá.",
+  "segments": [
+    {
+      "id": 0,
+      "seek": 0,
+      "start": 0.0,
+      "end": 3.1,
+      "text": " Recordame comprar leche",
+      "tokens": [50364, 1, 2, 3],
+      "temperature": 0.0,
+      "avg_logprob": -0.21,
+      "compression_ratio": 1.2,
+      "no_speech_prob": 0.01
+    },
+    {
+      "id": 1,
+      "seek": 310,
+      "start": 3.1,
+      "end": 6.5,
+      "text": " y llamar a mamá.",
+      "tokens": [4, 5, 6],
+      "temperature": 0.0,
+      "avg_logprob": -0.18,
+      "compression_ratio": 1.1,
+      "no_speech_prob": 0.02
+    }
+  ],
+  "x_groq": {
+    "id": "req_01hx0000000000000000000000"
+  }
+}
