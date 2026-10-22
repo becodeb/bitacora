@@ -1,0 +1,51 @@
+/** English (default) UI copy. Keys mirror `es.ts` exactly — `i18n/index.ts` asserts this at module load. */
+export const en = {
+  common: {
+    cancel: "Cancel",
+    save: "Save",
+    retry: "Retry",
+    close: "Close",
+    loading: "Loading…",
+  },
+  onboarding: {
+    title: "Connect to Bitacora",
+    subtitle: "Enter your server address and access token.",
+    serverUrlLabel: "Server URL",
+    tokenLabel: "Access token",
+    connect: "Connect",
+    validating: "Checking connection…",
+    errorUnreachable: "Could not reach the server. Check the URL and your network.",
+    errorUnauthorized: "The server rejected the token.",
+  },
+  settings: {
+    title: "Settings",
+    serverUrlLabel: "Server URL",
+    tokenLabel: "Access token",
+    languageLabel: "Language",
+    languageEnglish: "English",
+    languageSpanish: "Spanish",
+    saved: "Settings saved.",
+  },
+  chat: {
+    title: "Chat",
+    composerPlaceholder: "Write something…",
+    send: "Send",
+    thinking: "Thinking…",
+    undo: "Undo",
+    undoing: "Undoing…",
+    undoneNone: "Nothing to undo.",
+    undoneSome: "Reverted {count} change(s).",
+    citationsSheetTitle: "Source entry",
+    errorGeneric: "Something went wrong. Try again.",
+    errorNetwork: "Connection lost. Try again.",
+    emptyHistory: "No messages yet. Say something to Bitacora.",
+    derivationPending: "Still reading the attachment…",
+    roleTool: "Tool step",
+  },
+  aboutYou: {
+    title: "What I know about you",
+    placeholder: "Coming soon.",
+  },
+};
+
+export type Translation = typeof en;
