@@ -41,6 +41,11 @@ npm run db:migrate
 npm run dev
 
 # Run the test suite (expects the dev DB from `npm run db:up` to be up).
+# The suite never reads or writes the dev database directly: a Vitest
+# globalSetup (src/test/global-setup.ts) creates and migrates a
+# separate <dev-db-name>_test database on the same Postgres server the
+# first time it runs, and every test connects to that one instead. Set
+# TEST_DATABASE_URL explicitly to point it somewhere else.
 npm test
 ```
 
