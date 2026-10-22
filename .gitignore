@@ -1,0 +1,15 @@
+# Dependencies and build output
+node_modules
+dist
+
+# Environment files (never commit real secrets)
+.env
+.env.*
+!.env.example
+
+# Private data: recordings, bake-off reports and anything else under a
+# project's data/ folder. These hold personal audio and transcripts and
+# must never be committed.
+samples/
+reports/
+data/
