@@ -1,0 +1,126 @@
+{
+  "format": "2.9",
+  "job": {
+    "id": "o6g6m5kiye",
+    "duration": 9,
+    "config": {
+      "type": "transcription",
+      "transcription_config": {
+        "language": "es",
+        "diarization": "speaker"
+      }
+    }
+  },
+  "metadata": {
+    "created_at": "2026-10-22T10:00:00.000Z",
+    "type": "transcription"
+  },
+  "results": [
+    {
+      "type": "word",
+      "start_time": 0.16,
+      "end_time": 0.48,
+      "alternatives": [{ "content": "Hola", "confidence": 0.98, "language": "es", "speaker": "S1" }]
+    },
+    {
+      "type": "word",
+      "start_time": 0.5,
+      "end_time": 0.82,
+      "alternatives": [{ "content": "Juan", "confidence": 0.9, "language": "es", "speaker": "S1" }]
+    },
+    {
+      "type": "punctuation",
+      "start_time": 0.82,
+      "end_time": 0.82,
+      "attaches_to": "previous",
+      "alternatives": [{ "content": ",", "confidence": 1, "language": "es" }]
+    },
+    {
+      "type": "word",
+      "start_time": 0.9,
+      "end_time": 1.1,
+      "alternatives": [{ "content": "qué", "confidence": 0.95, "language": "es", "speaker": "S1" }]
+    },
+    {
+      "type": "word",
+      "start_time": 1.12,
+      "end_time": 1.4,
+      "alternatives": [{ "content": "hora", "confidence": 0.96, "language": "es", "speaker": "S1" }]
+    },
+    {
+      "type": "word",
+      "start_time": 1.42,
+      "end_time": 1.9,
+      "alternatives": [
+        { "content": "llegás", "confidence": 0.88, "language": "es", "speaker": "S1" }
+      ]
+    },
+    {
+      "type": "punctuation",
+      "start_time": 1.9,
+      "end_time": 1.9,
+      "attaches_to": "previous",
+      "alternatives": [{ "content": "?", "confidence": 1, "language": "es" }]
+    },
+    {
+      "type": "word",
+      "start_time": 2.5,
+      "end_time": 2.8,
+      "alternatives": [
+        { "content": "Llego", "confidence": 0.92, "language": "es", "speaker": "S2" }
+      ]
+    },
+    {
+      "type": "word",
+      "start_time": 2.82,
+      "end_time": 2.9,
+      "alternatives": [{ "content": "a", "confidence": 0.99, "language": "es", "speaker": "S2" }]
+    },
+    {
+      "type": "word",
+      "start_time": 2.92,
+      "end_time": 3.1,
+      "alternatives": [{ "content": "las", "confidence": 0.97, "language": "es", "speaker": "S2" }]
+    },
+    {
+      "type": "word",
+      "start_time": 3.12,
+      "end_time": 3.5,
+      "alternatives": [{ "content": "ocho", "confidence": 0.94, "language": "es", "speaker": "S2" }]
+    },
+    {
+      "type": "punctuation",
+      "start_time": 3.5,
+      "end_time": 3.5,
+      "attaches_to": "previous",
+      "alternatives": [{ "content": ",", "confidence": 1, "language": "es" }]
+    },
+    {
+      "type": "word",
+      "start_time": 3.6,
+      "end_time": 3.8,
+      "alternatives": [{ "content": "no", "confidence": 0.95, "language": "es", "speaker": "S2" }]
+    },
+    {
+      "type": "word",
+      "start_time": 3.82,
+      "end_time": 4.0,
+      "alternatives": [{ "content": "hay", "confidence": 0.93, "language": "es", "speaker": "S2" }]
+    },
+    {
+      "type": "word",
+      "start_time": 4.02,
+      "end_time": 4.4,
+      "alternatives": [
+        { "content": "problema", "confidence": 0.9, "language": "es", "speaker": "S2" }
+      ]
+    },
+    {
+      "type": "punctuation",
+      "start_time": 4.4,
+      "end_time": 4.4,
+      "attaches_to": "previous",
+      "alternatives": [{ "content": ".", "confidence": 1, "language": "es" }]
+    }
+  ]
+}

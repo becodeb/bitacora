@@ -1,0 +1,9 @@
+{
+  "job": {
+    "id": "o6g6m5kiye",
+    "status": "rejected",
+    "errors": [
+      { "timestamp": "2026-10-22T10:00:05.000Z", "message": "Audio fetch error, http status 418" }
+    ]
+  }
+}
