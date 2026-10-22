@@ -25,7 +25,14 @@ export function createScriptedClaudeClient(
   return {
     calls,
     async runTurn(request, onTextDelta) {
-      calls.push(request);
+      // `request.messages` is the SAME array instance `run-turn.ts`'s
+      // loop keeps mutating (`messages.push(...)`) on every later
+      // iteration — recording `request` by reference would make every
+      // entry in `calls` reflect the FINAL mutated state once the turn
+      // finishes, not the state at the moment each call was actually
+      // made. A structural clone snapshots it instead, so a test can
+      // correctly inspect what an EARLIER call looked like.
+      calls.push(structuredClone(request));
       const script = scripts[index];
       index += 1;
       if (!script) {

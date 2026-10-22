@@ -11,7 +11,7 @@ import type { MemoryServiceDeps } from "../memory/service.js";
 import { rememberFact, undoLast, updateRule } from "../memory/service.js";
 import type { createHybridSearch } from "../search/hybrid-search.js";
 import type { SearchScope } from "../search/types.js";
-import { fetchHitText } from "./content-lookup.js";
+import { fetchHitText, truncateText } from "./content-lookup.js";
 import type { RefTracker } from "./refs.js";
 import type { AgentToolDefinition } from "./types.js";
 
@@ -109,6 +109,19 @@ function formatHits(hits: Array<{ ref: string; scope: string; text: string }>): 
   return hits.map((h) => `${h.ref} [${h.scope}] ${h.text}`).join("\n");
 }
 
+/** `open_topic` row cap: only the most recent N live memories of a topic are returned, so a topic with a long history cannot by itself blow the turn's token budget (see `token-budget.ts`). The response says how many older ones were omitted. */
+export const OPEN_TOPIC_ROW_LIMIT = 50;
+
+/**
+ * Last-resort cap applied to every tool's `resultText` in `executeTool`
+ * below, regardless of which tool ran or whether its own limits (the
+ * row cap above, `content-lookup.ts`'s per-hit truncation) already
+ * kept it small — a defense-in-depth bound so no single tool result,
+ * including one from a tool added later, can dominate the token budget
+ * on its own.
+ */
+export const TOOL_RESULT_HARD_CAP_CHARS = 4_000;
+
 const openTopicInput = z.object({ name: z.string().min(1) });
 const searchInput = z.object({
   query: z.string().min(1),
@@ -144,22 +157,41 @@ async function runOpenTopic(input: unknown, deps: AgentToolsDeps): Promise<ToolE
     };
   }
 
+  const [totalRow] = await deps.db
+    .select({ count: sql<number>`count(*)` })
+    .from(memories)
+    .where(sql`${memories.topicId} = ${topic.id} and ${memories.validTo} is null`);
+  const totalCount = Number(totalRow?.count ?? 0);
+
   const rows = await deps.db
     .select({ id: memories.id, content: memories.content, sourceEntryId: memories.sourceEntryId })
     .from(memories)
     .where(sql`${memories.topicId} = ${topic.id} and ${memories.validTo} is null`)
-    .orderBy(memories.createdAt);
+    .orderBy(sql`${memories.createdAt} desc`)
+    .limit(OPEN_TOPIC_ROW_LIMIT);
 
   const hits = rows.map((row) => ({
     ref: deps.refTracker.assign(row.sourceEntryId),
     scope: "memory",
-    text: row.content,
+    text: truncateText(row.content),
   }));
+  const omittedCount = Math.max(0, totalCount - rows.length);
+  const omittedNote = omittedCount > 0 ? `\n(+${omittedCount} older memories omitted)` : "";
+
+  // The omitted-count note is the whole point of the row cap above —
+  // reserve space for it before truncating the hits themselves, so
+  // `executeTool`'s hard cap (see `TOOL_RESULT_HARD_CAP_CHARS`) can
+  // never cut it off: without this, a topic with exactly enough
+  // memories to need both caps would silently lose the "omitted" note
+  // along with the memories it describes. `truncateText` is a true
+  // ceiling (its own marker included), so reserving exactly
+  // `omittedNote.length` here is exact, not an approximation.
+  const resultText = `${truncateText(formatHits(hits), TOOL_RESULT_HARD_CAP_CHARS - omittedNote.length)}${omittedNote}`;
 
   return {
-    resultText: formatHits(hits),
+    resultText,
     isError: false,
-    statusSummary: `opened topic '${topic.name}' (${rows.length} memories)`,
+    statusSummary: `opened topic '${topic.name}' (${rows.length} memories${omittedCount > 0 ? `, ${omittedCount} omitted` : ""})`,
   };
 }
 
@@ -285,7 +317,10 @@ export async function executeTool(
     };
   }
   try {
-    return await runner(input, deps);
+    const result = await runner(input, deps);
+    // See `TOOL_RESULT_HARD_CAP_CHARS`'s own comment: applied uniformly
+    // here, after every runner, not inside each one.
+    return { ...result, resultText: truncateText(result.resultText, TOOL_RESULT_HARD_CAP_CHARS) };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`tool '${name}' failed:`, error);

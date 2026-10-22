@@ -18,6 +18,7 @@ import {
   estimateTokensForMessage,
   estimateTokensForText,
   fitHistoryToBudget,
+  MAX_INPUT_TOKEN_BUDGET,
 } from "./token-budget.js";
 import { AGENT_TOOLS, executeTool } from "./tools.js";
 import type {
@@ -30,7 +31,8 @@ import type {
 
 /** Bounds the tool-calling loop so a confused model cannot run forever; the turn ends with a graceful final answer instead (see below). */
 const MAX_TOOL_ITERATIONS = 8;
-const MAX_OUTPUT_TOKENS = 4_096;
+/** Exported so tests can reproduce this module's own token-budget arithmetic exactly instead of re-guessing it (see `run-turn.test.ts`'s token-budget re-check test). */
+export const MAX_OUTPUT_TOKENS = 4_096;
 const DEFAULT_EFFORT = "low";
 
 export interface AgentTurnDeps {
@@ -40,6 +42,8 @@ export interface AgentTurnDeps {
   findHints: ReturnType<typeof createHybridSearch>["findHints"];
   memory: MemoryServiceDeps;
   effort?: "low" | "medium" | "high" | "xhigh" | "max";
+  /** Overrides `MAX_INPUT_TOKEN_BUDGET` (see `token-budget.ts`). Exists mainly so tests can force the budget-exceeded path deterministically without needing a multi-megabyte fixture. */
+  maxInputTokenBudget?: number;
 }
 
 export interface AgentTurnParams {
@@ -58,6 +62,8 @@ export interface AgentTurnResult {
   derivationPending: boolean;
   droppedHistoryCount: number;
   hitMaxIterations: boolean;
+  /** True when a mid-turn tool exchange grew `messages` past the token budget — see the loop's own comment. */
+  hitTokenBudget: boolean;
 }
 
 function toolResultBlocksFrom(
@@ -127,12 +133,16 @@ export async function runAgentTurn(
     ],
   };
 
+  const effectiveBudget = deps.maxInputTokenBudget ?? MAX_INPUT_TOKEN_BUDGET;
+  const systemTokens = estimateTokensForText(systemPrompt);
+  const toolsTokens = estimateTokensForText(JSON.stringify(AGENT_TOOLS));
   const reservedTokens =
-    estimateTokensForText(systemPrompt) +
-    estimateTokensForText(JSON.stringify(AGENT_TOOLS)) +
-    estimateTokensForMessage(apiUserMessage) +
-    MAX_OUTPUT_TOKENS;
-  const { kept: boundedHistory, droppedCount } = fitHistoryToBudget(history, reservedTokens);
+    systemTokens + toolsTokens + estimateTokensForMessage(apiUserMessage) + MAX_OUTPUT_TOKENS;
+  const { kept: boundedHistory, droppedCount } = fitHistoryToBudget(
+    history,
+    reservedTokens,
+    effectiveBudget,
+  );
   if (droppedCount > 0) {
     console.warn(
       `agent turn ${turnId}: dropped ${droppedCount} oldest history message(s) to stay under the token budget`,
@@ -144,13 +154,42 @@ export async function runAgentTurn(
   let lastStopReason: AgentStopReason = "end_turn";
   let lastUsage: AgentUsage = { inputTokens: 0, outputTokens: 0 };
   let hitMaxIterations = false;
+  let hitTokenBudget = false;
+
+  /**
+   * History is trimmed once, before the loop — but tool exchanges
+   * added WITHIN this turn (tool_use/tool_result pairs, and any
+   * thinking blocks) can only ever grow `messages` afterwards, never
+   * shrink: trimming them would split a tool round or drop a thinking
+   * block that a later block in the same turn still needs intact (see
+   * `chat-history.ts`'s module comment). So re-checked here, before
+   * EVERY call in the loop, not just once: if a turn's own accumulated
+   * tool results would push this call over budget, stop offering tools
+   * and ask for a plain-text final answer instead of growing further.
+   */
+  function currentRequestTokens(): number {
+    return (
+      systemTokens +
+      toolsTokens +
+      messages.reduce((sum, m) => sum + estimateTokensForMessage(m), 0) +
+      MAX_OUTPUT_TOKENS
+    );
+  }
 
   for (let iteration = 1; iteration <= MAX_TOOL_ITERATIONS; iteration++) {
+    const overBudget = currentRequestTokens() > effectiveBudget;
+    if (overBudget) {
+      hitTokenBudget = true;
+    }
+
     const startedAt = Date.now();
     const result = await deps.claudeClient.runTurn(
       {
         system: [{ text: systemPrompt, cacheControl: true }],
-        tools: AGENT_TOOLS,
+        // No tools offered once over budget: the model cannot grow
+        // `messages` any further this turn and is pushed toward a
+        // final text answer instead.
+        tools: overBudget ? [] : AGENT_TOOLS,
         messages,
         effort,
         maxTokens: MAX_OUTPUT_TOKENS,
@@ -167,7 +206,7 @@ export async function runAgentTurn(
       requestJson: {
         system: systemPrompt,
         messages,
-        toolNames: AGENT_TOOLS.map((t) => t.name),
+        toolNames: overBudget ? [] : AGENT_TOOLS.map((t) => t.name),
       },
       stopReason: result.stopReason,
       usage: result.usage,
@@ -186,6 +225,12 @@ export async function runAgentTurn(
     messages.push({ role: "assistant", content: result.content });
 
     if (result.stopReason === "refusal" || result.stopReason === "max_tokens") {
+      break;
+    }
+
+    if (overBudget) {
+      // No tools were offered this call (see above) — whatever text
+      // came back is this turn's final answer, win or lose.
       break;
     }
 
@@ -242,5 +287,6 @@ export async function runAgentTurn(
     derivationPending,
     droppedHistoryCount: droppedCount,
     hitMaxIterations,
+    hitTokenBudget,
   };
 }

@@ -4,6 +4,37 @@
  * turn's request. Each role/content pair below is its own row —
  * written as the turn progresses, not batched at the end — so a crash
  * mid-turn still leaves a correctly-replayable partial transcript.
+ *
+ * **Decision: `thinking`/`redacted_thinking` blocks are kept, not
+ * stripped, across turns.** Anthropic requires replaying earlier
+ * `thinking` blocks byte-for-byte (`signature` intact) when a model
+ * with preserved thinking re-reads them; a modified or dropped-then-
+ * reinstated block, or one replayed with a different `system`/`tools`
+ * prefix than it was produced with, fails with a 400. This is judged
+ * safe here because every condition that guidance calls out is already
+ * true of this agent's history path:
+ * - Rows are stored as the API returned them (`persistChatMessage`
+ *   writes `AgentContentBlock[]` straight from `claude-client.ts`'s
+ *   `fromAnthropicContent`, no reserialization through a different
+ *   shape) and read back the same way — a jsonb round trip changes
+ *   whitespace/key order, never the string values this check compares.
+ * - `token-budget.ts`'s `fitHistoryToBudget` only ever drops whole
+ *   exchanges from the FRONT (oldest first) — a contiguous run, never
+ *   the middle — which is exactly the one trimming shape Anthropic's
+ *   own guidance accepts as compatible with preserved thinking.
+ * - The system prompt (`prompt.ts`'s `buildSystemPrompt`) and the tool
+ *   list (`tools.ts`'s `AGENT_TOOLS`) are both static for this agent —
+ *   neither changes between turns — so the prefix a kept block was
+ *   produced against never silently changes underneath it.
+ * If any of those three stop holding (e.g. a per-turn system-prompt
+ * reminder, or a tool list that changes when calendar tools land in
+ * T12), re-derive this decision rather than assuming it still applies:
+ * the alternative is to strip `thinking`/`redacted_thinking` from
+ * `chat_messages` rows older than the current turn when loading history
+ * (not when storing — storage stays byte-for-byte either way).
+ * `claude-haiku-5-5` is not on the preserved-thinking-enforced model
+ * list as of 2026-10-22, so none of this is enforced today either way;
+ * it is written for when/if that changes.
  */
 import { desc, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";

@@ -60,6 +60,14 @@ function toAnthropicMessages(messages: ClaudeTurnRequest["messages"]): Anthropic
       if (block.type === "tool_use") {
         return { type: "tool_use", id: block.id, name: block.name, input: block.input };
       }
+      if (block.type === "thinking") {
+        // Echoed exactly as received — see the type's own doc comment
+        // in `types.ts`: a modified thinking block is a 400.
+        return { type: "thinking", thinking: block.thinking, signature: block.signature };
+      }
+      if (block.type === "redacted_thinking") {
+        return { type: "redacted_thinking", data: block.data };
+      }
       return {
         type: "tool_result",
         tool_use_id: block.tool_use_id,
@@ -77,9 +85,17 @@ function fromAnthropicContent(content: Anthropic.ContentBlock[]): AgentContentBl
       blocks.push({ type: "text", text: block.text });
     } else if (block.type === "tool_use") {
       blocks.push({ type: "tool_use", id: block.id, name: block.name, input: block.input });
+    } else if (block.type === "thinking") {
+      // Kept, not dropped: required when using tools with extended
+      // thinking — must be replayed verbatim (see `types.ts`) both
+      // within this turn's own tool loop and across later turns (see
+      // `chat-history.ts`'s module comment for that decision).
+      blocks.push({ type: "thinking", thinking: block.thinking, signature: block.signature });
+    } else if (block.type === "redacted_thinking") {
+      blocks.push({ type: "redacted_thinking", data: block.data });
     }
-    // Other block types (thinking, server tools, ...) are not used by
-    // this agent and are intentionally dropped.
+    // Other block types (server tools, ...) are not used by this agent
+    // and are intentionally dropped.
   }
   return blocks;
 }

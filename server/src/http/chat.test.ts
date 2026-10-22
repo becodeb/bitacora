@@ -1,19 +1,20 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { eq } from "drizzle-orm";
+import { asc, eq } from "drizzle-orm";
 import { PgBoss } from "pg-boss";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createScriptedClaudeClient } from "../agent/test-helpers.js";
 import type { ClaudeTurnResult } from "../agent/types.js";
 import { createDb } from "../db/client.js";
-import { changeLog, chatMessages, entries, memories } from "../db/schema.js";
+import { chatMessages, entries, memories } from "../db/schema.js";
 import { createFakeEmbedder } from "../embeddings/test-helpers.js";
 import type { IngestDeps } from "../ingestion/entries.js";
 import { EMBED_QUEUE, PHOTO_OCR_QUEUE, VOICE_TRANSCRIPTION_QUEUE } from "../jobs/queues.js";
 import { createScriptedJudge } from "../memory/test-helpers.js";
 import { createHybridSearch } from "../search/hybrid-search.js";
 import { createFileAttachmentStorage } from "../storage/attachment-storage.js";
+import { assertDefined } from "../test/assert.js";
 import { createApp } from "./app.js";
 
 const DEV_DATABASE_URL =
@@ -116,7 +117,7 @@ describe("POST /v1/chat", () => {
     expect(textEvents.map((e) => e.data).join("")).toBe("Hola, ¿en qué te ayudo?");
     const doneEvent = events.find((e) => e.event === "done");
     expect(doneEvent).toBeDefined();
-    expect(JSON.parse(doneEvent!.data).stopReason).toBe("end_turn");
+    expect(JSON.parse(assertDefined(doneEvent).data).stopReason).toBe("end_turn");
 
     const [entryRow] = await db.orm.select().from(entries).where(eq(entries.textBody, "hola"));
     expect(entryRow).toBeDefined();
@@ -152,7 +153,7 @@ describe("POST /v1/chat", () => {
     const events = parseSse(await res.text());
     const toolEvent = events.find((e) => e.event === "tool");
     expect(toolEvent).toBeDefined();
-    expect(JSON.parse(toolEvent!.data).name).toBe("remember");
+    expect(JSON.parse(assertDefined(toolEvent).data).name).toBe("remember");
 
     const [entryRow] = await db.orm
       .select()
@@ -229,7 +230,7 @@ describe("POST /v1/chat", () => {
     const events = parseSse(await res.text());
     const doneEvent = events.find((e) => e.event === "done");
     expect(doneEvent).toBeDefined();
-    expect(JSON.parse(doneEvent!.data).stopReason).toBe("refusal");
+    expect(JSON.parse(assertDefined(doneEvent).data).stopReason).toBe("refusal");
 
     const [entryRow] = await db.orm
       .select()
@@ -256,5 +257,137 @@ describe("POST /v1/chat", () => {
       body: JSON.stringify({ entryId: "00000000-0000-0000-0000-000000000000" }),
     });
     expect(res.status).toBe(404);
+  });
+
+  it("never leaks a raw exception message over SSE on an internal error", async () => {
+    const sensitiveDetail = "postgresql://bitacora:s3cr3t-password@internal-host:5432/bitacora";
+    const search = createHybridSearch({ db: db.orm, embedder: createFakeEmbedder() });
+    const judge = createScriptedJudge([{ action: "add" }]);
+    const agent = {
+      db: db.orm,
+      claudeClient: {
+        async runTurn(): Promise<never> {
+          throw new Error(`connection failed: ${sensitiveDetail}`);
+        },
+      },
+      hybridSearch: search.hybridSearch,
+      findHints: search.findHints,
+      memory: { db: db.orm, boss, embedder: createFakeEmbedder(), judge },
+    };
+    const app = createApp({ appToken: APP_TOKEN, checkDb: async () => true, ingest, agent });
+
+    const res = await app.request("/v1/chat", {
+      method: "POST",
+      headers: { ...authHeaders, "content-type": "application/json" },
+      body: JSON.stringify({ text: "mensaje que dispara un error interno" }),
+    });
+
+    const [entryRow] = await db.orm
+      .select()
+      .from(entries)
+      .where(eq(entries.textBody, "mensaje que dispara un error interno"));
+    if (entryRow) createdEntryIds.push(entryRow.id);
+
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).not.toContain(sensitiveDetail);
+    expect(text).not.toContain("s3cr3t-password");
+
+    const events = parseSse(text);
+    const errorEvent = events.find((e) => e.event === "error");
+    expect(errorEvent).toBeDefined();
+    const body = JSON.parse(assertDefined(errorEvent).data) as { code: string; message: string };
+    expect(body.code).toBe("internal_error");
+    expect(body.message).not.toContain(sensitiveDetail);
+  });
+
+  it("serializes two concurrent turns: chat_messages persist in order, never interleaved", async () => {
+    // A clean slate so this test's own rows are the only ones ordered
+    // below (chat_messages assistant/tool rows have no entryId to
+    // scope a targeted cleanup to — see `odd/tasks/mvp.md`'s T06 notes).
+    await db.orm.delete(chatMessages);
+
+    function delay(ms: number): Promise<void> {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    // One claudeClient shared by both concurrent requests (both go
+    // through the same app/router, hence the same mutex instance) —
+    // it echoes back whichever letter (A/B) is in the owner's own
+    // message, and deliberately answers "A" slower: without the
+    // mutex, B's writes would very likely land in between A's two
+    // writes (A-user, B-user, B-assistant, A-assistant).
+    const sharedClaudeClient = {
+      async runTurn(
+        request: { messages: Array<{ content: Array<{ type: string; text?: string }> }> },
+        onTextDelta: (text: string) => void,
+      ): Promise<ClaudeTurnResult> {
+        // The last message's content is [contextBlock, messageText] (see
+        // `agent/run-turn.ts`'s `apiUserMessage`) — the owner's own text
+        // is the LAST text block, not the first (which is the volatile
+        // topics/hints/date context block).
+        const lastMessage = request.messages.at(-1);
+        const userText = lastMessage?.content.filter((b) => b.type === "text").at(-1)?.text ?? "";
+        const letter = userText.endsWith("A") ? "A" : "B";
+        await delay(letter === "A" ? 30 : 1);
+        const replyText = `respuesta concurrente ${letter}`;
+        onTextDelta(replyText);
+        return {
+          content: [{ type: "text", text: replyText }],
+          stopReason: "end_turn",
+          usage: { inputTokens: 1, outputTokens: 1 },
+        };
+      },
+    };
+
+    function buildAgentDeps() {
+      const search = createHybridSearch({ db: db.orm, embedder: createFakeEmbedder() });
+      const judge = createScriptedJudge([{ action: "add" }]);
+      return {
+        db: db.orm,
+        claudeClient: sharedClaudeClient,
+        hybridSearch: search.hybridSearch,
+        findHints: search.findHints,
+        memory: { db: db.orm, boss, embedder: createFakeEmbedder(), judge },
+      };
+    }
+
+    const appA = createApp({
+      appToken: APP_TOKEN,
+      checkDb: async () => true,
+      ingest,
+      agent: buildAgentDeps(),
+    });
+
+    const requestA = appA.request("/v1/chat", {
+      method: "POST",
+      headers: { ...authHeaders, "content-type": "application/json" },
+      body: JSON.stringify({ text: "mensaje concurrente A" }),
+    });
+    const requestB = appA.request("/v1/chat", {
+      method: "POST",
+      headers: { ...authHeaders, "content-type": "application/json" },
+      body: JSON.stringify({ text: "mensaje concurrente B" }),
+    });
+
+    const [resA, resB] = await Promise.all([requestA, requestB]);
+    await Promise.all([resA.text(), resB.text()]);
+
+    for (const text of ["mensaje concurrente A", "mensaje concurrente B"]) {
+      const [entryRow] = await db.orm.select().from(entries).where(eq(entries.textBody, text));
+      if (entryRow) createdEntryIds.push(entryRow.id);
+    }
+
+    const rows = await db.orm.select().from(chatMessages).orderBy(asc(chatMessages.createdAt));
+    expect(rows).toHaveLength(4);
+
+    const labels = rows.map((row) => {
+      const block = (row.content as Array<{ type: string; text?: string }>).find(
+        (b) => b.type === "text",
+      );
+      return block?.text?.endsWith("A") ? "A" : "B";
+    });
+    // Exactly one of the two contiguous orderings — never interleaved.
+    expect(labels).toEqual(labels[0] === "A" ? ["A", "A", "B", "B"] : ["B", "B", "A", "A"]);
   });
 });

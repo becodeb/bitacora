@@ -23,7 +23,12 @@ export function estimateTokensForText(text: string): number {
 function estimateTokensForBlock(block: AgentContentBlock): number {
   if (block.type === "text") return estimateTokensForText(block.text);
   if (block.type === "tool_use") return estimateTokensForText(JSON.stringify(block.input));
-  return estimateTokensForText(block.content);
+  if (block.type === "tool_result") return estimateTokensForText(block.content);
+  if (block.type === "thinking") return estimateTokensForText(block.thinking);
+  // redacted_thinking: `data` is opaque/encrypted, not reasoning text —
+  // a fixed small estimate stands in for it rather than sizing the
+  // (unrelated) byte length of the encrypted blob.
+  return 16;
 }
 
 export function estimateTokensForMessage(message: AgentMessage): number {
@@ -31,27 +36,81 @@ export function estimateTokensForMessage(message: AgentMessage): number {
 }
 
 /**
- * Drops the oldest messages (in pairs, so a `tool_use` is never
- * separated from its `tool_result`) until the remaining history plus
- * `reservedTokens` (system + tools + volatile context, estimated by the
- * caller) fits `budget`. Returns the kept messages and whether anything
- * was dropped, so the caller can log/report the truncation.
+ * A plain user turn: the owner's own message (text only — never a
+ * `tool_result` reply, which is also sent as `role: "user"` per
+ * Anthropic's API, see `chat-history.ts`). This is the only point in
+ * the stored history where it is ever valid to start a request's
+ * `messages` array: starting mid-exchange would either begin with an
+ * `assistant` message (invalid — the API requires the first message to
+ * be `role: "user"`) or with an orphan `tool_result` whose matching
+ * `tool_use` was dropped (a 400 from the API either way).
+ */
+function isExchangeStart(message: AgentMessage): boolean {
+  return message.role === "user" && message.content.every((block) => block.type === "text");
+}
+
+/**
+ * Groups `history` into exchanges: each one starts at an
+ * `isExchangeStart` message and includes every message up to (not
+ * including) the next one. A leading fragment with no such message at
+ * all (e.g. history that was already truncated badly before this
+ * function existed) becomes its own exchange so it is still a candidate
+ * to drop, never silently kept.
+ */
+function splitIntoExchanges(history: AgentMessage[]): AgentMessage[][] {
+  const exchanges: AgentMessage[][] = [];
+  for (const message of history) {
+    if (exchanges.length === 0 || isExchangeStart(message)) {
+      exchanges.push([message]);
+    } else {
+      exchanges[exchanges.length - 1]?.push(message);
+    }
+  }
+  return exchanges;
+}
+
+/**
+ * Drops the oldest whole exchanges (an owner message plus every
+ * assistant/tool-result message that followed it, up to the next owner
+ * message) until the remaining history plus `reservedTokens` (system +
+ * tools + volatile context, estimated by the caller) fits `budget`.
+ * Dropping by exchange — never by individual message — is what
+ * guarantees the result either is empty or starts with a plain user
+ * text message: splitting an exchange could otherwise leave an orphan
+ * `tool_result` (whose `tool_use` got dropped) or a leading `assistant`
+ * message at the head of `messages`, both of which the API rejects
+ * with a 400. Returns the kept messages and how many were dropped, so
+ * the caller can log/report the truncation.
  */
 export function fitHistoryToBudget(
   history: AgentMessage[],
   reservedTokens: number,
   budget: number = MAX_INPUT_TOKEN_BUDGET,
 ): { kept: AgentMessage[]; droppedCount: number } {
-  let kept = history;
+  let exchanges = splitIntoExchanges(history);
   let droppedCount = 0;
 
+  const flatten = () => exchanges.flat();
   const totalTokens = () =>
-    reservedTokens + kept.reduce((sum, m) => sum + estimateTokensForMessage(m), 0);
+    reservedTokens + flatten().reduce((sum, m) => sum + estimateTokensForMessage(m), 0);
 
-  while (kept.length > 0 && totalTokens() > budget) {
-    kept = kept.slice(1);
-    droppedCount += 1;
+  for (;;) {
+    const [first, ...rest] = exchanges;
+    if (!first) {
+      break;
+    }
+    // The second condition only ever fires for a leading fragment with
+    // no proper exchange start at all (see `splitIntoExchanges`) — it
+    // is always safe to drop, since keeping it would violate the
+    // "starts with a plain user message" guarantee regardless of
+    // budget.
+    const firstMessage = first[0];
+    if (totalTokens() <= budget && firstMessage && isExchangeStart(firstMessage)) {
+      break;
+    }
+    droppedCount += first.length;
+    exchanges = rest;
   }
 
-  return { kept, droppedCount };
+  return { kept: flatten(), droppedCount };
 }

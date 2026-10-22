@@ -5,7 +5,9 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createDb } from "../db/client.js";
 import { changeLog, entries, memories, rules, topics } from "../db/schema.js";
 import { createFakeEmbedder } from "../embeddings/test-helpers.js";
+import { processEmbedJob } from "../jobs/embed.js";
 import { EMBED_QUEUE } from "../jobs/queues.js";
+import { assertDefined } from "../test/assert.js";
 import { rememberFact, undoLast, undoTurn, updateRule } from "./service.js";
 import { createScriptedJudge } from "./test-helpers.js";
 
@@ -56,6 +58,24 @@ async function makeEntry(text: string): Promise<string> {
   return row.id;
 }
 
+/**
+ * Writes a memory's embedding directly — the same effect as the embed
+ * worker that `enqueueEmbedJob` schedules but which never runs in these
+ * tests. Needed before any test scripts an `update` decision: real
+ * dedup candidates (`findDedupCandidates`) only ever include memories
+ * with a non-null `embedding`, so an un-embedded memory can never be a
+ * genuine candidate — see `normalizeJudgeDecision`'s guard in
+ * `service.ts`, added after T06's review found tests that scripted
+ * `update` against a candidate the real search would never have
+ * surfaced.
+ */
+async function embedMemory(memoryId: string): Promise<void> {
+  await processEmbedJob(
+    { db: db.orm, embedder: createFakeEmbedder() },
+    { targetTable: "memories", targetId: memoryId },
+  );
+}
+
 function deps(judge: ReturnType<typeof createScriptedJudge>) {
   return { db: db.orm, boss, embedder: createFakeEmbedder(), judge };
 }
@@ -81,7 +101,7 @@ describe("rememberFact", () => {
     const [memoryRow] = await db.orm
       .select()
       .from(memories)
-      .where(eq(memories.id, result.memoryId!));
+      .where(eq(memories.id, assertDefined(result.memoryId)));
     expect(memoryRow?.content).toBe("El owner estudia Ingeniería en Sistemas.");
     expect(memoryRow?.validTo).toBeNull();
 
@@ -124,9 +144,12 @@ describe("rememberFact", () => {
       turnId: randomUUID(),
     });
     expect(first.memoryId).toBeDefined();
+    await embedMemory(assertDefined(first.memoryId));
 
     const updateTurnId = randomUUID();
-    const updateJudge = createScriptedJudge([{ action: "update", supersedesId: first.memoryId! }]);
+    const updateJudge = createScriptedJudge([
+      { action: "update", supersedesId: assertDefined(first.memoryId) },
+    ]);
     const second = await rememberFact(deps(updateJudge), {
       content: "El owner vive en Buenos Aires.",
       sourceEntryId,
@@ -136,10 +159,16 @@ describe("rememberFact", () => {
     expect(second.action).toBe("update");
     expect(second.supersededId).toBe(first.memoryId);
 
-    const [oldRow] = await db.orm.select().from(memories).where(eq(memories.id, first.memoryId!));
+    const [oldRow] = await db.orm
+      .select()
+      .from(memories)
+      .where(eq(memories.id, assertDefined(first.memoryId)));
     expect(oldRow?.validTo).not.toBeNull();
 
-    const [newRow] = await db.orm.select().from(memories).where(eq(memories.id, second.memoryId!));
+    const [newRow] = await db.orm
+      .select()
+      .from(memories)
+      .where(eq(memories.id, assertDefined(second.memoryId)));
     expect(newRow?.supersedesId).toBe(first.memoryId);
 
     const logRows = await db.orm
@@ -168,6 +197,57 @@ describe("rememberFact", () => {
       .from(changeLog)
       .where(eq(changeLog.actionGroupId, turnId));
     expect(logRows).toHaveLength(0);
+  });
+
+  it("treats an update as add when supersedesId is a real memory that was never offered as a candidate", async () => {
+    // A real, unrelated memory that exists in the DB but has nothing
+    // to do with this test's dedup search — the judge below names it
+    // anyway, simulating a hallucinated or otherwise-invalid choice.
+    const unrelatedEntryId = await makeEntry("texto no relacionado");
+    const unrelatedAddJudge = createScriptedJudge([{ action: "add" }]);
+    const unrelated = await rememberFact(deps(unrelatedAddJudge), {
+      content: "Un dato completamente distinto sobre otra cosa.",
+      sourceEntryId: unrelatedEntryId,
+      turnId: randomUUID(),
+    });
+    expect(unrelated.memoryId).toBeDefined();
+
+    const sourceEntryId = await makeEntry("texto");
+    const turnId = randomUUID();
+    const hallucinatingJudge = createScriptedJudge([
+      { action: "update", supersedesId: assertDefined(unrelated.memoryId) },
+    ]);
+
+    const result = await rememberFact(deps(hallucinatingJudge), {
+      content: "fact not related to the unrelated memory above",
+      sourceEntryId,
+      turnId,
+    });
+
+    // Downgraded to add: the new fact is still saved, but it does not
+    // supersede the memory the judge named.
+    expect(result.action).toBe("add");
+    expect(result.supersededId).toBeUndefined();
+
+    const [memoryRow] = await db.orm
+      .select()
+      .from(memories)
+      .where(eq(memories.id, assertDefined(result.memoryId)));
+    expect(memoryRow?.supersedesId).toBeNull();
+
+    // The unrelated memory itself must be untouched.
+    const [unrelatedRow] = await db.orm
+      .select()
+      .from(memories)
+      .where(eq(memories.id, assertDefined(unrelated.memoryId)));
+    expect(unrelatedRow?.validTo).toBeNull();
+
+    const logRows = await db.orm
+      .select()
+      .from(changeLog)
+      .where(eq(changeLog.actionGroupId, turnId));
+    expect(logRows).toHaveLength(1);
+    expect(logRows[0]?.operation).toBe("insert");
   });
 });
 
@@ -233,7 +313,10 @@ describe("undoTurn / undoLast", () => {
     const undone = await undoTurn({ db: db.orm }, turnId);
     expect(undone.revertedCount).toBe(1);
 
-    const [row] = await db.orm.select().from(memories).where(eq(memories.id, result.memoryId!));
+    const [row] = await db.orm
+      .select()
+      .from(memories)
+      .where(eq(memories.id, assertDefined(result.memoryId)));
     expect(row).toBeUndefined();
   });
 
@@ -245,9 +328,12 @@ describe("undoTurn / undoLast", () => {
       sourceEntryId,
       turnId: randomUUID(),
     });
+    await embedMemory(assertDefined(first.memoryId));
 
     const updateTurnId = randomUUID();
-    const updateJudge = createScriptedJudge([{ action: "update", supersedesId: first.memoryId! }]);
+    const updateJudge = createScriptedJudge([
+      { action: "update", supersedesId: assertDefined(first.memoryId) },
+    ]);
     const second = await rememberFact(deps(updateJudge), {
       content: "corrected fact",
       sourceEntryId,
@@ -257,10 +343,16 @@ describe("undoTurn / undoLast", () => {
     const undone = await undoTurn({ db: db.orm }, updateTurnId);
     expect(undone.revertedCount).toBe(2);
 
-    const [oldRow] = await db.orm.select().from(memories).where(eq(memories.id, first.memoryId!));
+    const [oldRow] = await db.orm
+      .select()
+      .from(memories)
+      .where(eq(memories.id, assertDefined(first.memoryId)));
     expect(oldRow?.validTo).toBeNull();
 
-    const [newRow] = await db.orm.select().from(memories).where(eq(memories.id, second.memoryId!));
+    const [newRow] = await db.orm
+      .select()
+      .from(memories)
+      .where(eq(memories.id, assertDefined(second.memoryId)));
     expect(newRow).toBeUndefined();
   });
 
@@ -288,7 +380,10 @@ describe("undoTurn / undoLast", () => {
     const undone = await undoLast({ db: db.orm });
     expect(undone?.turnId).toBe(turnId);
 
-    const [row] = await db.orm.select().from(memories).where(eq(memories.id, result.memoryId!));
+    const [row] = await db.orm
+      .select()
+      .from(memories)
+      .where(eq(memories.id, assertDefined(result.memoryId)));
     expect(row).toBeUndefined();
   });
 

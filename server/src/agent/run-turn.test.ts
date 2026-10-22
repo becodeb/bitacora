@@ -8,8 +8,12 @@ import { createFakeEmbedder } from "../embeddings/test-helpers.js";
 import { EMBED_QUEUE } from "../jobs/queues.js";
 import { createScriptedJudge } from "../memory/test-helpers.js";
 import { createHybridSearch } from "../search/hybrid-search.js";
-import { runAgentTurn } from "./run-turn.js";
+import { assertDefined } from "../test/assert.js";
+import { buildSystemPrompt } from "./prompt.js";
+import { MAX_OUTPUT_TOKENS, runAgentTurn } from "./run-turn.js";
 import { createScriptedClaudeClient } from "./test-helpers.js";
+import { estimateTokensForMessage, estimateTokensForText } from "./token-budget.js";
+import { AGENT_TOOLS } from "./tools.js";
 import type { ClaudeTurnResult } from "./types.js";
 
 const DEV_DATABASE_URL =
@@ -129,7 +133,7 @@ describe("runAgentTurn", () => {
     const [memoryRow] = await db.orm
       .select()
       .from(memories)
-      .where(eq(memories.id, logRows[0]!.targetId));
+      .where(eq(memories.id, assertDefined(logRows[0]).targetId));
     expect(memoryRow?.content).toBe("Estudia Ingeniería en Sistemas.");
     expect(memoryRow?.sourceEntryId).toBe(entryId);
   });
@@ -155,7 +159,7 @@ describe("runAgentTurn", () => {
     // this test), so the vector ranker has something to match against.
     await processEmbedJob(
       { db: db.orm, embedder: fakeEmbedder },
-      { targetTable: "memories", targetId: primed.memoryId! },
+      { targetTable: "memories", targetId: assertDefined(primed.memoryId) },
     );
 
     const entryId = await makeEntry("qué estudio");
@@ -214,5 +218,152 @@ describe("runAgentTurn", () => {
       .from(memories)
       .where(eq(memories.content, "truncated"));
     expect(memoryRows).toHaveLength(0);
+  });
+
+  it("echoes the first iteration's thinking block back verbatim on the second call", async () => {
+    const entryId = await makeEntry("mensaje con herramienta");
+    const search = createHybridSearch({ db: db.orm, embedder: createFakeEmbedder() });
+    const judge = createScriptedJudge([{ action: "add" }]);
+    const claudeClient = createScriptedClaudeClient([
+      {
+        content: [
+          {
+            type: "thinking",
+            thinking: "pensando si usar una herramienta...",
+            signature: "sig-abc123",
+          },
+          { type: "tool_use", id: "toolu_1", name: "search", input: { query: "algo" } },
+        ],
+        stopReason: "tool_use",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      },
+      {
+        content: [{ type: "text", text: "listo." }],
+        stopReason: "end_turn",
+        usage: { inputTokens: 20, outputTokens: 3 },
+      },
+    ]);
+    const deps = {
+      db: db.orm,
+      claudeClient,
+      hybridSearch: search.hybridSearch,
+      findHints: search.findHints,
+      memory: { db: db.orm, boss, embedder: createFakeEmbedder(), judge },
+    };
+
+    await runAgentTurn(deps, { entryId });
+
+    expect(claudeClient.calls).toHaveLength(2);
+    const secondCallMessages = claudeClient.calls[1]?.messages ?? [];
+    const assistantMessageWithThinking = secondCallMessages.find((m) =>
+      m.content.some((b) => b.type === "thinking"),
+    );
+    expect(assistantMessageWithThinking).toBeDefined();
+    const thinkingBlock = assistantMessageWithThinking?.content.find((b) => b.type === "thinking");
+    expect(thinkingBlock).toEqual({
+      type: "thinking",
+      thinking: "pensando si usar una herramienta...",
+      signature: "sig-abc123",
+    });
+  });
+
+  it("re-checks the token budget before every call: a tool exchange that grows past it stops offering tools", async () => {
+    // This test computes its tiny budget from a known-empty history, so
+    // start from one: other tests in this suite (and this file's shared
+    // test database in general — see `odd/tasks/mvp.md`'s T06 notes on
+    // `chat_messages` test cleanup) leave assistant/tool rows behind
+    // with no per-entry id to scope a targeted cleanup to.
+    await db.orm.delete(chatMessages);
+
+    const messageText = "mensaje con herramienta y presupuesto chico";
+    const script: ClaudeTurnResult[] = [
+      {
+        content: [
+          {
+            type: "tool_use",
+            id: "toolu_1",
+            name: "remember",
+            // A large input, not the tool's small result, is what
+            // reliably grows `messages` between iteration 1 and 2 —
+            // the fake `search`/`remember` tool results are tiny
+            // regardless of input, but this `tool_use` block itself
+            // (replayed verbatim into iteration 2's `messages`, like
+            // any assistant content block) is exactly as large as its
+            // `input`.
+            input: { content: "x".repeat(6_000) },
+          },
+        ],
+        stopReason: "tool_use",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      },
+      {
+        content: [{ type: "text", text: "listo, con lo que había." }],
+        stopReason: "end_turn",
+        usage: { inputTokens: 20, outputTokens: 3 },
+      },
+    ];
+
+    function makeDeps(maxInputTokenBudget?: number) {
+      const search = createHybridSearch({ db: db.orm, embedder: createFakeEmbedder() });
+      const judge = createScriptedJudge([{ action: "add" }]);
+      return {
+        db: db.orm,
+        claudeClient: createScriptedClaudeClient(script),
+        hybridSearch: search.hybridSearch,
+        findHints: search.findHints,
+        memory: { db: db.orm, boss, embedder: createFakeEmbedder(), judge },
+        maxInputTokenBudget,
+      };
+    }
+
+    // Phase A: run once with an effectively unlimited budget, purely to
+    // measure exactly what iteration 1's own request costs in this
+    // module's own estimate — reusing `run-turn.ts`'s exported
+    // constants/helpers instead of re-deriving its internal arithmetic.
+    const measuringEntryId = await makeEntry(messageText);
+    const measuringClient = createScriptedClaudeClient(script);
+    await runAgentTurn(
+      {
+        db: db.orm,
+        claudeClient: measuringClient,
+        hybridSearch: createHybridSearch({ db: db.orm, embedder: createFakeEmbedder() })
+          .hybridSearch,
+        findHints: createHybridSearch({ db: db.orm, embedder: createFakeEmbedder() }).findHints,
+        memory: {
+          db: db.orm,
+          boss,
+          embedder: createFakeEmbedder(),
+          judge: createScriptedJudge([{ action: "add" }]),
+        },
+        maxInputTokenBudget: Number.MAX_SAFE_INTEGER,
+      },
+      { entryId: measuringEntryId },
+    );
+    const iteration1Messages = measuringClient.calls[0]?.messages ?? [];
+    const iteration1Tokens =
+      estimateTokensForText(buildSystemPrompt()) +
+      estimateTokensForText(JSON.stringify(AGENT_TOOLS)) +
+      iteration1Messages.reduce((sum, m) => sum + estimateTokensForMessage(m), 0) +
+      MAX_OUTPUT_TOKENS;
+    await db.orm.delete(chatMessages);
+
+    // Phase B: a budget just above what iteration 1 alone measured —
+    // comfortably enough for iteration 1 (identical request, same
+    // history-less entry text) to pass, but not enough once iteration
+    // 1's large `tool_use` input is appended ahead of iteration 2.
+    const tinyBudget = iteration1Tokens + 50;
+    const entryId = await makeEntry(messageText);
+    const deps = makeDeps(tinyBudget);
+
+    const result = await runAgentTurn(deps, { entryId });
+
+    expect(deps.claudeClient.calls).toHaveLength(2);
+    expect(deps.claudeClient.calls[0]?.tools.length).toBeGreaterThan(0);
+    // Iteration 2, after the large tool_use input grew `messages`,
+    // must not offer tools — the loop asks for a final answer instead
+    // of growing further.
+    expect(deps.claudeClient.calls[1]?.tools).toEqual([]);
+    expect(result.hitTokenBudget).toBe(true);
+    expect(result.text).toBe("listo, con lo que había.");
   });
 });

@@ -7,11 +7,23 @@
 
 export type AgentRole = "user" | "assistant";
 
-/** A minimal, provider-shaped content block — close enough to Anthropic's own `ContentBlockParam` that a real request can be built directly from it, but with no SDK import required to construct one in a test. */
+/**
+ * A minimal, provider-shaped content block — close enough to
+ * Anthropic's own `ContentBlockParam` that a real request can be built
+ * directly from it, but with no SDK import required to construct one
+ * in a test.
+ *
+ * `thinking`/`redacted_thinking` must be echoed back to the API
+ * byte-for-byte (`signature`/`data` included) whenever an assistant
+ * turn that produced them is replayed — see `claude-client.ts` and
+ * `chat-history.ts` for where that matters.
+ */
 export type AgentContentBlock =
   | { type: "text"; text: string }
   | { type: "tool_use"; id: string; name: string; input: unknown }
-  | { type: "tool_result"; tool_use_id: string; content: string; is_error?: boolean };
+  | { type: "tool_result"; tool_use_id: string; content: string; is_error?: boolean }
+  | { type: "thinking"; thinking: string; signature: string }
+  | { type: "redacted_thinking"; data: string };
 
 export interface AgentMessage {
   role: AgentRole;

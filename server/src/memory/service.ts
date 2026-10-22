@@ -12,7 +12,7 @@ import type { PgBoss } from "pg-boss";
 import { changeLog, memories, rules, topics } from "../db/schema.js";
 import type { Embedder } from "../embeddings/types.js";
 import { enqueueEmbedJob } from "../jobs/embed.js";
-import type { MemoryJudge } from "./types.js";
+import type { JudgeDecision, MemoryJudge, MemoryJudgeCandidate } from "./types.js";
 
 export interface MemoryServiceDeps {
   db: NodePgDatabase;
@@ -125,7 +125,8 @@ export async function rememberFact(
   params: RememberFactParams,
 ): Promise<RememberFactResult> {
   const candidates = await findDedupCandidates(deps, params.content, params.topicName);
-  const decision = await deps.judge.decide({ newContent: params.content, candidates });
+  const rawDecision = await deps.judge.decide({ newContent: params.content, candidates });
+  const decision = normalizeJudgeDecision(rawDecision, candidates);
 
   return deps.db.transaction(async (tx) => {
     const topicId = params.topicName
@@ -180,6 +181,35 @@ export async function rememberFact(
 
     return { memoryId, action: "add" as const, topicId };
   });
+}
+
+/**
+ * Guards against a judge that returns `update` with a `supersedesId`
+ * that was never offered to it as a candidate — a hallucinated or
+ * otherwise-real-but-unrelated memory id, from a judge implementation
+ * that does not validate its own tool input as strictly as
+ * `claude-judge.ts` does (or a future one that doesn't validate at
+ * all). Downgraded to `add`, not `noop`: this project's existing
+ * stance (see `rememberFact`'s own comment on a degraded-candidates
+ * outage) is that an occasional avoidable duplicate — fixable later by
+ * nightly consolidation, T08 — is the safer failure than silently
+ * dropping a fact the owner told it. Logged so it is visible rather
+ * than silent.
+ */
+function normalizeJudgeDecision(
+  decision: JudgeDecision,
+  candidates: MemoryJudgeCandidate[],
+): JudgeDecision {
+  if (decision.action !== "update") {
+    return decision;
+  }
+  if (candidates.some((candidate) => candidate.id === decision.supersedesId)) {
+    return decision;
+  }
+  console.warn(
+    `rememberFact: judge chose to supersede memory ${decision.supersedesId}, which was not among the ${candidates.length} candidate(s) it was shown; treating as add instead.`,
+  );
+  return { action: "add" };
 }
 
 async function findDedupCandidates(

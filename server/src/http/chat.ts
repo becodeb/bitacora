@@ -18,6 +18,7 @@ import {
   type IngestDeps,
 } from "../ingestion/entries.js";
 import { classifyAttachmentMime, MAX_REQUEST_BODY_BYTES } from "../ingestion/mime.js";
+import { Mutex } from "../lib/mutex.js";
 import { undoLast } from "../memory/service.js";
 
 const MULTIPART_CONTENT_TYPE_PREFIX = "multipart/form-data";
@@ -107,6 +108,15 @@ async function resolveEntryId(c: Context, deps: ChatDeps): Promise<string> {
 
 export function createChatRouter(deps: ChatDeps): Hono {
   const router = new Hono();
+  // Serializes the agent turn itself (not entry ingestion above, which
+  // has nothing shared to interleave) — see `lib/mutex.ts`'s own
+  // comment for why an in-process mutex is the right tool here:
+  // Bitacora runs as one single-user, single process, so two
+  // concurrent `POST /v1/chat` calls are the only way the shared chat
+  // history (`chat_messages`, loaded and appended to by
+  // `agent/run-turn.ts`) could otherwise be read and written out of
+  // order between them.
+  const turnMutex = new Mutex();
 
   const limitBody = bodyLimit({
     maxSize: MAX_REQUEST_BODY_BYTES,
@@ -124,40 +134,54 @@ export function createChatRouter(deps: ChatDeps): Hono {
       throw error;
     }
 
-    return streamSSE(
-      c,
-      async (stream) => {
-        const result = await runAgentTurn(deps.agent, {
-          entryId,
-          onTextDelta: (text) => {
-            void stream.writeSSE({ event: "text", data: text });
-          },
-          onToolEvent: (event) => {
-            void stream.writeSSE({ event: "tool", data: JSON.stringify(event) });
-          },
-        });
+    return streamSSE(c, async (stream) => {
+      // Caught HERE, not left to hono's own `onError` path: `streamSSE`
+      // (see `hono/streaming`'s `sse.js`) writes the raw `Error.message`
+      // of anything that escapes this callback as the `error` event's
+      // `data`, unconditionally, even when an `onError` callback is
+      // also given. That is fine for our own `ChatInputError`s above
+      // (deliberately user-facing, sent as a plain JSON 4xx before the
+      // stream even opens) but never acceptable mid-stream: a DB
+      // connection string, a file path, or a stack frame can end up in
+      // an ordinary `Error.message` without anyone intending it as
+      // user-facing text. So nothing is allowed to escape this
+      // callback at all — every step is wrapped, the detail is logged
+      // server-side, and only a stable generic code/message reaches
+      // the client.
+      try {
+        await turnMutex.run(async () => {
+          const result = await runAgentTurn(deps.agent, {
+            entryId,
+            onTextDelta: (text) => {
+              void stream.writeSSE({ event: "text", data: text });
+            },
+            onToolEvent: (event) => {
+              void stream.writeSSE({ event: "tool", data: JSON.stringify(event) });
+            },
+          });
 
-        for (const citation of result.citations) {
-          await stream.writeSSE({ event: "citations", data: JSON.stringify(citation) });
-        }
+          for (const citation of result.citations) {
+            await stream.writeSSE({ event: "citations", data: JSON.stringify(citation) });
+          }
 
-        await stream.writeSSE({
-          event: "done",
-          data: JSON.stringify({
-            turnId: result.turnId,
-            stopReason: result.stopReason,
-            usage: result.usage,
-            derivationPending: result.derivationPending,
-          }),
+          await stream.writeSSE({
+            event: "done",
+            data: JSON.stringify({
+              turnId: result.turnId,
+              stopReason: result.stopReason,
+              usage: result.usage,
+              derivationPending: result.derivationPending,
+            }),
+          });
         });
-      },
-      // Always emits a `data`-bearing `error` event on an uncaught
-      // exception inside the callback above (see hono's `streamSSE`
-      // helper); logging here is just for the server's own visibility.
-      async (error) => {
+      } catch (error) {
         console.error("chat turn failed:", error);
-      },
-    );
+        await stream.writeSSE({
+          event: "error",
+          data: JSON.stringify({ code: "internal_error", message: "An internal error occurred." }),
+        });
+      }
+    });
   });
 
   router.post("/undo", async (c) => {
