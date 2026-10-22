@@ -16,6 +16,7 @@ import { createHybridSearch } from "../search/hybrid-search.js";
 import { createFileAttachmentStorage } from "../storage/attachment-storage.js";
 import { assertDefined } from "../test/assert.js";
 import { createApp } from "./app.js";
+import { createStubAdminJobsDeps } from "./test-helpers.js";
 
 const DEV_DATABASE_URL =
   process.env.DATABASE_URL ?? "postgresql://bitacora:bitacora@localhost:55432/bitacora";
@@ -64,7 +65,13 @@ function buildApp(scripts: ClaudeTurnResult[]) {
     findHints: search.findHints,
     memory: { db: db.orm, boss, embedder: createFakeEmbedder(), judge },
   };
-  return createApp({ appToken: APP_TOKEN, checkDb: async () => true, ingest, agent });
+  return createApp({
+    appToken: APP_TOKEN,
+    checkDb: async () => true,
+    ingest,
+    agent,
+    adminJobs: createStubAdminJobsDeps(),
+  });
 }
 
 const authHeaders = { Authorization: `Bearer ${APP_TOKEN}` };
@@ -274,7 +281,13 @@ describe("POST /v1/chat", () => {
       findHints: search.findHints,
       memory: { db: db.orm, boss, embedder: createFakeEmbedder(), judge },
     };
-    const app = createApp({ appToken: APP_TOKEN, checkDb: async () => true, ingest, agent });
+    const app = createApp({
+      appToken: APP_TOKEN,
+      checkDb: async () => true,
+      ingest,
+      agent,
+      adminJobs: createStubAdminJobsDeps(),
+    });
 
     const res = await app.request("/v1/chat", {
       method: "POST",
@@ -357,6 +370,7 @@ describe("POST /v1/chat", () => {
       checkDb: async () => true,
       ingest,
       agent: buildAgentDeps(),
+      adminJobs: createStubAdminJobsDeps(),
     });
 
     const requestA = appA.request("/v1/chat", {

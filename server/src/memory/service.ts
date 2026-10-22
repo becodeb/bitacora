@@ -78,6 +78,24 @@ async function findOrCreateTopic(
   return topicId;
 }
 
+/**
+ * Marks a topic as having a live memory written just now, so the
+ * nightly consolidation job (T08) knows its `summary` is stale and due
+ * for regeneration (see `db/schema.ts`'s `memoriesChangedAt` comment).
+ * Called from both this service's own memory writes below and from
+ * `consolidation/consolidation.ts`'s own memory mutations (merge /
+ * supersede) — kept here, not duplicated there, since both need the
+ * exact same bookkeeping.
+ */
+export async function bumpTopicMemoriesChanged(
+  // biome-ignore lint/suspicious/noExplicitAny: same structural-typing limitation as the rest of this file's transaction helpers.
+  tx: any,
+  topicId: string | null | undefined,
+): Promise<void> {
+  if (!topicId) return;
+  await tx.update(topics).set({ memoriesChangedAt: new Date() }).where(eq(topics.id, topicId));
+}
+
 async function writeChangeLog(
   // biome-ignore lint/suspicious/noExplicitAny: same as findOrCreateTopic above.
   tx: any,
@@ -155,6 +173,7 @@ export async function rememberFact(
       after: insertValues,
     });
     await enqueueEmbedJob(deps.boss, { targetTable: "memories", targetId: memoryId }, tx);
+    await bumpTopicMemoriesChanged(tx, topicId);
 
     if (decision.action === "update") {
       const [before] = await tx

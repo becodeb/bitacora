@@ -1,5 +1,27 @@
 import { PgBoss } from "pg-boss";
-import { EMBED_QUEUE, PHOTO_OCR_QUEUE, VOICE_TRANSCRIPTION_QUEUE } from "./queues.js";
+import {
+  DAILY_ROLLUP_QUEUE,
+  EMBED_QUEUE,
+  NIGHTLY_CONSOLIDATION_QUEUE,
+  PHOTO_OCR_QUEUE,
+  VOICE_TRANSCRIPTION_QUEUE,
+} from "./queues.js";
+import { scheduleNightlyJobs } from "./schedule.js";
+
+/**
+ * T08's two nightly jobs are each idempotent and safe to re-run (see
+ * `rollup/rollup.ts` and `consolidation/consolidation.ts`), so a retry
+ * on transient failure (a dropped DB connection, a rate-limited Claude
+ * call) is safe; kept shorter/fewer than the derivation queues' because
+ * a nightly job failing all its retries just waits for tomorrow's run
+ * (or an admin backfill) rather than blocking anything the owner is
+ * waiting on.
+ */
+const NIGHTLY_JOB_RETRY_OPTIONS = {
+  retryLimit: 2,
+  retryDelay: 60,
+  retryBackoff: true,
+} as const;
 
 /**
  * Retries a few times with backoff before giving up — a transcription
@@ -34,4 +56,7 @@ export async function startBoss(boss: PgBoss): Promise<void> {
   // a transient network/provider error, and nothing downstream blocks on
   // it (search just degrades, see `search/hybrid-search.ts`).
   await boss.createQueue(EMBED_QUEUE, DERIVATION_RETRY_OPTIONS);
+  await boss.createQueue(DAILY_ROLLUP_QUEUE, NIGHTLY_JOB_RETRY_OPTIONS);
+  await boss.createQueue(NIGHTLY_CONSOLIDATION_QUEUE, NIGHTLY_JOB_RETRY_OPTIONS);
+  await scheduleNightlyJobs(boss);
 }

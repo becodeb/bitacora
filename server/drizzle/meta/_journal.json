@@ -36,6 +36,13 @@
       "when": 1792695131097,
       "tag": "0004_wild_secret_warriors",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1792698868618,
+      "tag": "0005_wonderful_vindicator",
+      "breakpoints": true
     }
   ]
 }

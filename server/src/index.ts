@@ -2,16 +2,24 @@ import { serve } from "@hono/node-server";
 import { createAnthropicClaudeClient } from "./agent/claude-client.js";
 import type { AgentTurnDeps } from "./agent/run-turn.js";
 import { type Config, loadConfig } from "./config.js";
+import { createClaudeConsolidationJudge } from "./consolidation/claude-consolidation-judge.js";
+import { createClaudeTopicSummarizer } from "./consolidation/claude-topic-summarizer.js";
+import type { ConsolidationDeps } from "./consolidation/consolidation.js";
 import { checkDb, createDb } from "./db/client.js";
 import { createVoyageEmbedder } from "./embeddings/voyage.js";
+import type { AdminJobsDeps } from "./http/admin-jobs.js";
 import { createApp } from "./http/app.js";
 import type { IngestDeps } from "./ingestion/entries.js";
 import { createBoss, startBoss } from "./jobs/boss.js";
+import { registerDailyRollupWorker } from "./jobs/daily-rollup-job.js";
 import { registerEmbedWorker } from "./jobs/embed.js";
+import { registerNightlyConsolidationWorker } from "./jobs/nightly-consolidation-job.js";
 import { registerPhotoOcrWorker } from "./jobs/photo-ocr.js";
 import { registerVoiceTranscribeWorker } from "./jobs/voice-transcribe.js";
 import { createClaudeMemoryJudge } from "./memory/claude-judge.js";
 import { createPlaceholderOcr } from "./ocr/placeholder.js";
+import { createClaudeRollupSummarizer } from "./rollup/claude-rollup.js";
+import type { RollupDeps } from "./rollup/rollup.js";
 import { createHybridSearch } from "./search/hybrid-search.js";
 import { createFileAttachmentStorage } from "./storage/attachment-storage.js";
 import { createGroqTranscriber } from "./transcription/groq.js";
@@ -59,6 +67,20 @@ async function main(): Promise<void> {
   await registerPhotoOcrWorker(boss, { db: orm, storage, ocr: createPlaceholderOcr(), boss });
   await registerEmbedWorker(boss, { db: orm, embedder });
 
+  const rollupDeps: RollupDeps = {
+    db: orm,
+    summarizer: createClaudeRollupSummarizer({ apiKey: config.ANTHROPIC_API_KEY }),
+  };
+  const consolidationDeps: ConsolidationDeps = {
+    db: orm,
+    boss,
+    judge: createClaudeConsolidationJudge({ apiKey: config.ANTHROPIC_API_KEY }),
+    topicSummarizer: createClaudeTopicSummarizer({ apiKey: config.ANTHROPIC_API_KEY }),
+  };
+  await registerDailyRollupWorker(boss, rollupDeps);
+  await registerNightlyConsolidationWorker(boss, consolidationDeps);
+  const adminJobs: AdminJobsDeps = { rollup: rollupDeps, consolidation: consolidationDeps };
+
   const search = createHybridSearch({ db: orm, embedder });
   const agent: AgentTurnDeps = {
     db: orm,
@@ -79,6 +101,7 @@ async function main(): Promise<void> {
     checkDb: () => checkDb(pool),
     ingest,
     agent,
+    adminJobs,
   });
 
   const server = serve({ fetch: app.fetch, port: config.PORT }, (info) => {

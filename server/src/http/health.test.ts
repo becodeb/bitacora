@@ -4,6 +4,7 @@ import { createStubAgentDeps } from "../agent/test-helpers.js";
 import { checkDb } from "../db/client.js";
 import { createStubIngestDeps } from "../ingestion/test-helpers.js";
 import { createApp } from "./app.js";
+import { createStubAdminJobsDeps } from "./test-helpers.js";
 
 // Mirrors compose.dev.yml's credentials and the host port chosen there.
 // Override with DATABASE_URL for a dev DB running elsewhere.
@@ -17,6 +18,7 @@ describe("GET /health", () => {
       checkDb: async () => false,
       ingest: createStubIngestDeps(),
       agent: createStubAgentDeps(),
+      adminJobs: createStubAdminJobsDeps(),
     });
 
     const res = await app.request("/health");
@@ -35,6 +37,7 @@ describe("GET /health", () => {
         }),
       ingest: createStubIngestDeps(),
       agent: createStubAgentDeps(),
+      adminJobs: createStubAdminJobsDeps(),
     });
 
     const startedAt = Date.now();
@@ -59,6 +62,7 @@ describe("GET /health", () => {
         checkDb: () => checkDb(pool),
         ingest: createStubIngestDeps(),
         agent: createStubAgentDeps(),
+        adminJobs: createStubAdminJobsDeps(),
       });
 
       const res = await app.request("/health");

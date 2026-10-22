@@ -14,6 +14,7 @@ import { runVoiceJobAttempt } from "../jobs/voice-transcribe.js";
 import { createFileAttachmentStorage } from "../storage/attachment-storage.js";
 import type { Transcriber } from "../transcription/types.js";
 import { createApp } from "./app.js";
+import { createStubAdminJobsDeps } from "./test-helpers.js";
 
 const DEV_DATABASE_URL =
   process.env.DATABASE_URL ?? "postgresql://bitacora:bitacora@localhost:55432/bitacora";
@@ -59,6 +60,7 @@ function buildApp() {
     checkDb: async () => true,
     ingest,
     agent: createStubAgentDeps(),
+    adminJobs: createStubAdminJobsDeps(),
   });
 }
 

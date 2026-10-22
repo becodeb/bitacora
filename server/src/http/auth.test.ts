@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createStubAgentDeps } from "../agent/test-helpers.js";
 import { createStubIngestDeps } from "../ingestion/test-helpers.js";
 import { createApp } from "./app.js";
+import { createStubAdminJobsDeps } from "./test-helpers.js";
 
 const APP_TOKEN = "correct-token-0123456789";
 
@@ -11,6 +12,7 @@ function buildApp() {
     checkDb: async () => true,
     ingest: createStubIngestDeps(),
     agent: createStubAgentDeps(),
+    adminJobs: createStubAdminJobsDeps(),
   });
 }
 

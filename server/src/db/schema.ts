@@ -63,6 +63,20 @@ export const topics = pgTable(
     name: text("name").notNull(),
     description: text("description"),
     summary: text("summary"),
+    // Bumped to `now()` whenever a live memory belonging to this topic is
+    // written (see `memory/service.ts`'s `bumpTopicMemoriesChanged` and
+    // `consolidation/consolidation.ts`). Compared against
+    // `summaryGeneratedAt` by the nightly consolidation job (T08) to
+    // decide which topics' summaries are stale. `null` means "no memory
+    // has ever been written for this topic through that bump" — in
+    // practice, a topic with zero live memories (nothing to summarize
+    // yet), since every memory write that sets a topic also bumps this
+    // column in the same transaction. Such a topic is not treated as
+    // stale (see `consolidation/consolidation.ts`'s `findStaleTopics`).
+    memoriesChangedAt: timestamp("memories_changed_at", { withTimezone: true }),
+    // Set by the nightly consolidation job each time it regenerates
+    // `summary`. `null` until the first regeneration.
+    summaryGeneratedAt: timestamp("summary_generated_at", { withTimezone: true }),
     // Nullable: populated asynchronously once embeddings are wired up (T05).
     embedding: vector("embedding", { dimensions: EMBEDDING_DIMENSIONS }),
     searchVector: tsvector("search_vector").generatedAlwaysAs(
@@ -294,6 +308,11 @@ export const dailyRollups = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     rollupDate: date("rollup_date").notNull(),
     summary: text("summary").notNull(),
+    // The entries (raw log) this rollup's summary was built from, so the
+    // diary can cite its sources. Empty for a rollup generated before
+    // this column existed (none, in practice: days with no content never
+    // get a row at all — see `rollup/rollup.ts`).
+    sourceEntryIds: uuid("source_entry_ids").array().notNull().default([]),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
