@@ -1,0 +1,37 @@
+{
+  "id": "9cc93efa-6f1f-4a3e-8e2d-example-id",
+  "status": "completed",
+  "language_code": "es",
+  "audio_duration": 9,
+  "confidence": 0.93,
+  "text": "Hola Juan, ¿a qué hora llegás? Llego a las ocho, no hay problema. Dale, nos vemos ahí.",
+  "utterances": [
+    {
+      "speaker": "A",
+      "text": "Hola Juan, ¿a qué hora llegás?",
+      "start": 160,
+      "end": 2400,
+      "confidence": 0.95,
+      "words": [
+        { "text": "Hola", "start": 160, "end": 480, "confidence": 0.98, "speaker": "A" },
+        { "text": "Juan,", "start": 500, "end": 820, "confidence": 0.9, "speaker": "A" }
+      ]
+    },
+    {
+      "speaker": "B",
+      "text": "Llego a las ocho, no hay problema.",
+      "start": 2500,
+      "end": 5800,
+      "confidence": 0.91,
+      "words": [{ "text": "Llego", "start": 2500, "end": 2800, "confidence": 0.92, "speaker": "B" }]
+    },
+    {
+      "speaker": "A",
+      "text": "Dale, nos vemos ahí.",
+      "start": 5900,
+      "end": 8700,
+      "confidence": 0.93,
+      "words": [{ "text": "Dale,", "start": 5900, "end": 6100, "confidence": 0.94, "speaker": "A" }]
+    }
+  ]
+}
