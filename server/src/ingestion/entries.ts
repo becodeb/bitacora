@@ -3,6 +3,7 @@ import { sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { fromDrizzle, type PgBoss } from "pg-boss";
 import { attachments, entries } from "../db/schema.js";
+import { enqueueEmbedJob } from "../jobs/embed.js";
 import {
   type DerivationJobData,
   PHOTO_OCR_QUEUE,
@@ -23,17 +24,21 @@ export interface CreatedEntry {
   attachment?: { id: string; derivedTextStatus: "pending" };
 }
 
-/** Stores a `kind: "text"` entry. No attachment, no derivation job — the text is already final. */
+/**
+ * Stores a `kind: "text"` entry. No attachment or derivation job — the
+ * text is already final — but its T05 embedding job is enqueued in the
+ * same transaction as the insert, the same `fromDrizzle` pattern used
+ * for the derivation queues below.
+ */
 export async function createTextEntry(deps: IngestDeps, text: string): Promise<CreatedEntry> {
-  const [row] = await deps.db.insert(entries).values({ kind: "text", textBody: text }).returning({
-    id: entries.id,
+  const entryId = randomUUID();
+
+  await deps.db.transaction(async (tx) => {
+    await tx.insert(entries).values({ id: entryId, kind: "text", textBody: text });
+    await enqueueEmbedJob(deps.boss, { targetTable: "entries", targetId: entryId }, tx);
   });
 
-  if (!row) {
-    throw new Error("insert did not return a row");
-  }
-
-  return { entryId: row.id, kind: "text" };
+  return { entryId, kind: "text" };
 }
 
 /**

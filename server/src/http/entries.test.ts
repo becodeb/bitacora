@@ -19,6 +19,7 @@ const DEV_DATABASE_URL =
 const APP_TOKEN = "entries-test-token-0123456789";
 const VOICE_QUEUE = "voice-transcription";
 const PHOTO_QUEUE = "photo-ocr";
+const EMBED_QUEUE = "embed";
 
 const db = createDb(DEV_DATABASE_URL);
 const boss = new PgBoss(DEV_DATABASE_URL);
@@ -31,6 +32,7 @@ beforeAll(async () => {
   await boss.start();
   await boss.createQueue(VOICE_QUEUE);
   await boss.createQueue(PHOTO_QUEUE);
+  await boss.createQueue(EMBED_QUEUE);
   dataDir = await mkdtemp(join(tmpdir(), "bitacora-entries-http-"));
   ingest = { db: db.orm, boss, storage: createFileAttachmentStorage(dataDir) };
 });
@@ -187,7 +189,7 @@ describe("POST /v1/entries", () => {
     };
 
     await runVoiceJobAttempt(
-      { db: db.orm, storage: ingest.storage, transcriber: fakeTranscriber },
+      { db: db.orm, storage: ingest.storage, transcriber: fakeTranscriber, boss },
       {
         data: job?.data ?? { entryId: body.id, attachmentId: body.attachment.id },
         retryCount: 0,

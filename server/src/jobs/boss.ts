@@ -1,5 +1,5 @@
 import { PgBoss } from "pg-boss";
-import { PHOTO_OCR_QUEUE, VOICE_TRANSCRIPTION_QUEUE } from "./queues.js";
+import { EMBED_QUEUE, PHOTO_OCR_QUEUE, VOICE_TRANSCRIPTION_QUEUE } from "./queues.js";
 
 /**
  * Retries a few times with backoff before giving up — a transcription
@@ -30,4 +30,8 @@ export async function startBoss(boss: PgBoss): Promise<void> {
   await boss.start();
   await boss.createQueue(VOICE_TRANSCRIPTION_QUEUE, DERIVATION_RETRY_OPTIONS);
   await boss.createQueue(PHOTO_OCR_QUEUE, DERIVATION_RETRY_OPTIONS);
+  // Same retry shape as the derivation queues: a Voyage call can fail on
+  // a transient network/provider error, and nothing downstream blocks on
+  // it (search just degrades, see `search/hybrid-search.ts`).
+  await boss.createQueue(EMBED_QUEUE, DERIVATION_RETRY_OPTIONS);
 }

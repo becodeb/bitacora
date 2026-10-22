@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import type { PgBoss } from "pg-boss";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { createDb } from "../db/client.js";
 import { attachments, entries } from "../db/schema.js";
@@ -6,6 +7,9 @@ import { createPlaceholderOcr } from "../ocr/placeholder.js";
 import type { OcrPort } from "../ocr/types.js";
 import type { AttachmentStorage } from "../storage/attachment-storage.js";
 import { type PhotoOcrDeps, runPhotoJobAttempt } from "./photo-ocr.js";
+
+/** T05's embed job is enqueued fire-and-forget once derivedText is written; these tests only assert OCR's own outcome, so a bare stub is enough. */
+const fakeBoss = { send: async () => undefined } as unknown as PgBoss;
 
 const DEV_DATABASE_URL =
   process.env.DATABASE_URL ?? "postgresql://bitacora:bitacora@localhost:55432/bitacora";
@@ -64,7 +68,12 @@ describe("processPhotoJob (via runPhotoJobAttempt)", () => {
     const { entryId, attachmentId } = await insertPhotoFixture();
     createdEntryIds.push(entryId);
 
-    const deps: PhotoOcrDeps = { db: db.orm, storage: fakeStorage, ocr: createPlaceholderOcr() };
+    const deps: PhotoOcrDeps = {
+      db: db.orm,
+      storage: fakeStorage,
+      ocr: createPlaceholderOcr(),
+      boss: fakeBoss,
+    };
     await runPhotoJobAttempt(deps, {
       data: { entryId, attachmentId },
       retryCount: 0,
@@ -87,7 +96,12 @@ describe("processPhotoJob (via runPhotoJobAttempt)", () => {
 
     // retryCount === retryLimit would mark "failed" on a thrown error, but
     // not_available is not an error, so it must still resolve "not_available".
-    const deps: PhotoOcrDeps = { db: db.orm, storage: fakeStorage, ocr: createPlaceholderOcr() };
+    const deps: PhotoOcrDeps = {
+      db: db.orm,
+      storage: fakeStorage,
+      ocr: createPlaceholderOcr(),
+      boss: fakeBoss,
+    };
     await runPhotoJobAttempt(deps, {
       data: { entryId, attachmentId },
       retryCount: 3,
@@ -109,7 +123,7 @@ describe("processPhotoJob (via runPhotoJobAttempt)", () => {
       recognize: async () => ({ status: "done", text: "Sistemas: exam on Monday." }),
     };
 
-    const deps: PhotoOcrDeps = { db: db.orm, storage: fakeStorage, ocr: doneOcr };
+    const deps: PhotoOcrDeps = { db: db.orm, storage: fakeStorage, ocr: doneOcr, boss: fakeBoss };
     await runPhotoJobAttempt(deps, {
       data: { entryId, attachmentId },
       retryCount: 0,
@@ -136,7 +150,12 @@ describe("processPhotoJob (via runPhotoJobAttempt)", () => {
       },
     };
 
-    const deps: PhotoOcrDeps = { db: db.orm, storage: fakeStorage, ocr: failingOcr };
+    const deps: PhotoOcrDeps = {
+      db: db.orm,
+      storage: fakeStorage,
+      ocr: failingOcr,
+      boss: fakeBoss,
+    };
 
     await expect(
       runPhotoJobAttempt(deps, { data: { entryId, attachmentId }, retryCount: 3, retryLimit: 3 }),

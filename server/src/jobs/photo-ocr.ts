@@ -4,12 +4,14 @@ import type { PgBoss } from "pg-boss";
 import { attachments, entries } from "../db/schema.js";
 import type { OcrPort } from "../ocr/types.js";
 import type { AttachmentStorage } from "../storage/attachment-storage.js";
+import { enqueueEmbedJob } from "./embed.js";
 import { type DerivationJobData, PHOTO_OCR_QUEUE } from "./queues.js";
 
 export interface PhotoOcrDeps {
   db: NodePgDatabase;
   storage: AttachmentStorage;
   ocr: OcrPort;
+  boss: PgBoss;
 }
 
 /**
@@ -43,13 +45,19 @@ export async function processPhotoJob(deps: PhotoOcrDeps, job: DerivationJobData
   }
 
   await deps.db.transaction(async (tx) => {
-    await tx.execute(
+    const updated = await tx.execute(
       sql`update ${entries} set derived_text = ${outcome.text} where id = ${job.entryId} and derived_text is null`,
     );
     await tx
       .update(attachments)
       .set({ derivedTextStatus: "done" })
       .where(sql`${attachments.id} = ${job.attachmentId}`);
+
+    // Same "only on the write that actually happened" guard as
+    // `voice-transcribe.ts`'s `processVoiceJob` — see its comment.
+    if (updated.rowCount && updated.rowCount > 0) {
+      await enqueueEmbedJob(deps.boss, { targetTable: "entries", targetId: job.entryId }, tx);
+    }
   });
 }
 

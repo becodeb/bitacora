@@ -15,6 +15,10 @@ const envSchema = z.object({
   // process), so it is required even though no HTTP route reads it
   // directly.
   GROQ_API_KEY: z.string().trim().min(1, "GROQ_API_KEY is required"),
+  // Voyage AI, used to embed entries/memories/topics and search queries
+  // (T05). Required for the same reason as GROQ_API_KEY: the embed
+  // worker runs in this same process.
+  VOYAGE_API_KEY: z.string().trim().min(1, "VOYAGE_API_KEY is required"),
   // Directory where attachment files (photos, voice notes) are stored.
   // Relative paths resolve against the process's current working
   // directory. Gitignored; never committed.

@@ -6,6 +6,7 @@ const validEnv = {
   APP_TOKEN: "a-token-that-is-long-enough",
   PORT: "3000",
   GROQ_API_KEY: "a-fake-groq-key",
+  VOYAGE_API_KEY: "a-fake-voyage-key",
   DATA_DIR: "./data",
 };
 
@@ -18,6 +19,7 @@ describe("loadConfig", () => {
       APP_TOKEN: validEnv.APP_TOKEN,
       PORT: 3000,
       GROQ_API_KEY: validEnv.GROQ_API_KEY,
+      VOYAGE_API_KEY: validEnv.VOYAGE_API_KEY,
       DATA_DIR: validEnv.DATA_DIR,
     });
   });
@@ -40,6 +42,12 @@ describe("loadConfig", () => {
     const { GROQ_API_KEY, ...rest } = validEnv;
 
     expect(() => loadConfig(rest)).toThrowError(/GROQ_API_KEY/);
+  });
+
+  it("rejects a missing VOYAGE_API_KEY", () => {
+    const { VOYAGE_API_KEY, ...rest } = validEnv;
+
+    expect(() => loadConfig(rest)).toThrowError(/VOYAGE_API_KEY/);
   });
 
   it("rejects a missing DATABASE_URL", () => {

@@ -4,6 +4,7 @@ import type { PgBoss } from "pg-boss";
 import { attachments, entries } from "../db/schema.js";
 import type { AttachmentStorage } from "../storage/attachment-storage.js";
 import type { Transcriber } from "../transcription/types.js";
+import { enqueueEmbedJob } from "./embed.js";
 import { type DerivationJobData, VOICE_TRANSCRIPTION_QUEUE } from "./queues.js";
 
 /** Voice notes are recorded in Spanish (Rioplatense), per `odd/tasks/mvp.md`. */
@@ -13,6 +14,7 @@ export interface VoiceTranscribeDeps {
   db: NodePgDatabase;
   storage: AttachmentStorage;
   transcriber: Transcriber;
+  boss: PgBoss;
 }
 
 /**
@@ -25,6 +27,11 @@ export interface VoiceTranscribeDeps {
  * `attachments.derived_text_status` only ever becomes "failed" once
  * retries are exhausted, via `registerVoiceTranscribeWorker`'s catch
  * below.
+ *
+ * The entry's T05 embedding job is enqueued in the same transaction,
+ * but only when this attempt is the one that actually wrote
+ * `derivedText` — not on a retry that finds it already set by an
+ * earlier attempt, which would otherwise enqueue a redundant job.
  */
 export async function processVoiceJob(
   deps: VoiceTranscribeDeps,
@@ -45,13 +52,17 @@ export async function processVoiceJob(
     .trim();
 
   await deps.db.transaction(async (tx) => {
-    await tx.execute(
+    const updated = await tx.execute(
       sql`update ${entries} set derived_text = ${text} where id = ${job.entryId} and derived_text is null`,
     );
     await tx
       .update(attachments)
       .set({ derivedTextStatus: "done" })
       .where(sql`${attachments.id} = ${job.attachmentId}`);
+
+    if (updated.rowCount && updated.rowCount > 0) {
+      await enqueueEmbedJob(deps.boss, { targetTable: "entries", targetId: job.entryId }, tx);
+    }
   });
 }
 

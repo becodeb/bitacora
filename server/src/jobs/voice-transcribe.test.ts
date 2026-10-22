@@ -1,11 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
+import type { PgBoss } from "pg-boss";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { createDb } from "../db/client.js";
 import { attachments, entries } from "../db/schema.js";
 import type { AttachmentStorage } from "../storage/attachment-storage.js";
 import type { Transcriber } from "../transcription/types.js";
 import { runVoiceJobAttempt, type VoiceTranscribeDeps } from "./voice-transcribe.js";
+
+/** T05's embed job is enqueued fire-and-forget once derivedText is written; these tests only assert transcription's own outcome, so a bare stub is enough. */
+const fakeBoss = { send: async () => undefined } as unknown as PgBoss;
 
 // Mirrors compose.dev.yml's credentials and the host port chosen there,
 // same convention as db/schema.test.ts.
@@ -85,6 +89,7 @@ describe("processVoiceJob (via runVoiceJobAttempt)", () => {
       db: db.orm,
       storage: fakeStorage,
       transcriber: fakeTranscriber,
+      boss: fakeBoss,
     };
     await runVoiceJobAttempt(deps, {
       data: { entryId, attachmentId },
@@ -124,6 +129,7 @@ describe("processVoiceJob (via runVoiceJobAttempt)", () => {
       db: db.orm,
       storage: fakeStorage,
       transcriber: fakeTranscriber,
+      boss: fakeBoss,
     };
     await runVoiceJobAttempt(deps, {
       data: { entryId, attachmentId },
@@ -149,6 +155,7 @@ describe("processVoiceJob (via runVoiceJobAttempt)", () => {
       db: db.orm,
       storage: fakeStorage,
       transcriber: failingTranscriber,
+      boss: fakeBoss,
     };
 
     await expect(
@@ -176,6 +183,7 @@ describe("processVoiceJob (via runVoiceJobAttempt)", () => {
       db: db.orm,
       storage: fakeStorage,
       transcriber: failingTranscriber,
+      boss: fakeBoss,
     };
 
     await expect(
@@ -198,6 +206,7 @@ describe("processVoiceJob (via runVoiceJobAttempt)", () => {
           throw new Error("should not be called");
         },
       },
+      boss: fakeBoss,
     };
 
     await expect(
