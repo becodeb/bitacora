@@ -1,0 +1,25 @@
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    container_name: bitacora-dev-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: bitacora
+      POSTGRES_PASSWORD: bitacora
+      POSTGRES_DB: bitacora
+    ports:
+      # Host port 55432 avoids 5432 (Postgres default, already bound on this
+      # machine), 54432 (the friedict project) and 8080 (taken by another
+      # service). Keep DATABASE_URL in .env.example in sync with this port.
+      - "55432:5432"
+    volumes:
+      - bitacora-dev-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bitacora -d bitacora"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  bitacora-dev-db-data:
+    name: bitacora-dev-db-data
