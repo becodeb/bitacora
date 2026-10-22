@@ -5,6 +5,8 @@ const validEnv = {
   DATABASE_URL: "postgresql://bitacora:bitacora@localhost:55432/bitacora",
   APP_TOKEN: "a-token-that-is-long-enough",
   PORT: "3000",
+  GROQ_API_KEY: "a-fake-groq-key",
+  DATA_DIR: "./data",
 };
 
 describe("loadConfig", () => {
@@ -15,6 +17,8 @@ describe("loadConfig", () => {
       DATABASE_URL: validEnv.DATABASE_URL,
       APP_TOKEN: validEnv.APP_TOKEN,
       PORT: 3000,
+      GROQ_API_KEY: validEnv.GROQ_API_KEY,
+      DATA_DIR: validEnv.DATA_DIR,
     });
   });
 
@@ -23,6 +27,19 @@ describe("loadConfig", () => {
     const config = loadConfig(rest);
 
     expect(config.PORT).toBe(3000);
+  });
+
+  it("defaults DATA_DIR to ./data when absent", () => {
+    const { DATA_DIR, ...rest } = validEnv;
+    const config = loadConfig(rest);
+
+    expect(config.DATA_DIR).toBe("./data");
+  });
+
+  it("rejects a missing GROQ_API_KEY", () => {
+    const { GROQ_API_KEY, ...rest } = validEnv;
+
+    expect(() => loadConfig(rest)).toThrowError(/GROQ_API_KEY/);
   });
 
   it("rejects a missing DATABASE_URL", () => {

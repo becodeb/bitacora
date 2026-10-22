@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createStubIngestDeps } from "../ingestion/test-helpers.js";
 import { createApp } from "./app.js";
 
 const APP_TOKEN = "correct-token-0123456789";
@@ -7,6 +8,7 @@ function buildApp() {
   return createApp({
     appToken: APP_TOKEN,
     checkDb: async () => true,
+    ingest: createStubIngestDeps(),
   });
 }
 

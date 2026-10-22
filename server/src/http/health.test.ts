@@ -1,6 +1,7 @@
 import { Pool } from "pg";
 import { afterAll, describe, expect, it } from "vitest";
 import { checkDb } from "../db/client.js";
+import { createStubIngestDeps } from "../ingestion/test-helpers.js";
 import { createApp } from "./app.js";
 
 // Mirrors compose.dev.yml's credentials and the host port chosen there.
@@ -13,6 +14,7 @@ describe("GET /health", () => {
     const app = createApp({
       appToken: "irrelevant-for-this-test",
       checkDb: async () => false,
+      ingest: createStubIngestDeps(),
     });
 
     const res = await app.request("/health");
@@ -29,6 +31,7 @@ describe("GET /health", () => {
           // Never resolves or rejects: simulates a stuck check without
           // touching the network or a real database.
         }),
+      ingest: createStubIngestDeps(),
     });
 
     const startedAt = Date.now();
@@ -51,6 +54,7 @@ describe("GET /health", () => {
       const app = createApp({
         appToken: "irrelevant-for-this-test",
         checkDb: () => checkDb(pool),
+        ingest: createStubIngestDeps(),
       });
 
       const res = await app.request("/health");

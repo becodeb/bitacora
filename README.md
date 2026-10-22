@@ -29,7 +29,8 @@ npm install
 # Start the dev Postgres (pgvector/pgvector:pg17) in Docker.
 npm run db:up
 
-# Copy the env template and fill in a real APP_TOKEN.
+# Copy the env template and fill in a real APP_TOKEN and GROQ_API_KEY
+# (the latter is in ~/.credentials/bitacora.env; never commit it).
 cp .env.example .env
 
 # Apply database migrations (enables the vector/pg_trgm extensions and
@@ -46,3 +47,13 @@ npm test
 Other useful scripts: `npm run typecheck`, `npm run lint`, `npm run format`,
 `npm run build` / `npm start` (compiled production build), and
 `npm run db:down` to stop the dev database.
+
+### Ingestion (T04)
+
+`POST /v1/entries` stores text, photo or voice entries and `GET
+/v1/entries/:id` reads one back. Photo and voice attachments are
+written to disk under `DATA_DIR` (default `./data`, gitignored) before
+their DB rows are committed. Voice transcription and photo OCR run
+asynchronously afterwards, via a pg-boss worker started in the same
+process as the HTTP server (`npm run dev`/`npm start` runs both); OCR is
+a placeholder until T07 picks an engine.

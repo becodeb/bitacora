@@ -2,6 +2,13 @@ import { serve } from "@hono/node-server";
 import { type Config, loadConfig } from "./config.js";
 import { checkDb, createDb } from "./db/client.js";
 import { createApp } from "./http/app.js";
+import type { IngestDeps } from "./ingestion/entries.js";
+import { createBoss, startBoss } from "./jobs/boss.js";
+import { registerPhotoOcrWorker } from "./jobs/photo-ocr.js";
+import { registerVoiceTranscribeWorker } from "./jobs/voice-transcribe.js";
+import { createPlaceholderOcr } from "./ocr/placeholder.js";
+import { createFileAttachmentStorage } from "./storage/attachment-storage.js";
+import { createGroqTranscriber } from "./transcription/groq.js";
 
 /**
  * Upper bound on how long shutdown waits for `pool.end()` to finish
@@ -12,7 +19,7 @@ import { createApp } from "./http/app.js";
  */
 const SHUTDOWN_GRACE_MILLIS = 3_000;
 
-function main(): void {
+async function main(): Promise<void> {
   let config: Config;
 
   try {
@@ -23,10 +30,30 @@ function main(): void {
     return;
   }
 
-  const { pool } = createDb(config.DATABASE_URL);
+  const { pool, orm } = createDb(config.DATABASE_URL);
+  const storage = createFileAttachmentStorage(config.DATA_DIR);
+
+  // Shares one Postgres connection string with `pool` above, but keeps
+  // its own internal pool: pg-boss manages its own `pgboss` schema and
+  // connection lifecycle independently of the Drizzle pool used for the
+  // app's own tables.
+  const boss = createBoss(config.DATABASE_URL);
+  boss.on("error", (error) => console.error("pg-boss error:", error));
+  await startBoss(boss);
+
+  const ingest: IngestDeps = { db: orm, boss, storage };
+
+  await registerVoiceTranscribeWorker(boss, {
+    db: orm,
+    storage,
+    transcriber: createGroqTranscriber({ apiKey: config.GROQ_API_KEY }),
+  });
+  await registerPhotoOcrWorker(boss, { db: orm, storage, ocr: createPlaceholderOcr() });
+
   const app = createApp({
     appToken: config.APP_TOKEN,
     checkDb: () => checkDb(pool),
+    ingest,
   });
 
   const server = serve({ fetch: app.fetch, port: config.PORT }, (info) => {
@@ -36,13 +63,12 @@ function main(): void {
   const shutdown = async (): Promise<void> => {
     server.close();
 
-    // Race pool.end() against a grace period instead of awaiting it
-    // unconditionally: a connection stuck mid-connect must not block
-    // process exit. Either way we exit once one of the two settles.
+    // Race the pool/worker teardown against a grace period instead of
+    // awaiting it unconditionally: a connection stuck mid-connect must
+    // not block process exit. Either way we exit once one of the two
+    // settles.
     await Promise.race([
-      pool.end().catch(() => {
-        // Ignored: we exit regardless of how the pool reports closing.
-      }),
+      Promise.allSettled([boss.stop({ timeout: SHUTDOWN_GRACE_MILLIS }), pool.end()]),
       new Promise<void>((resolve) => setTimeout(resolve, SHUTDOWN_GRACE_MILLIS)),
     ]);
 
@@ -53,4 +79,7 @@ function main(): void {
   process.on("SIGTERM", shutdown);
 }
 
-main();
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

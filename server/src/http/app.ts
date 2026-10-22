@@ -1,6 +1,8 @@
 import { Hono } from "hono";
+import type { IngestDeps } from "../ingestion/entries.js";
 import { withTimeout } from "../lib/with-timeout.js";
 import { bearerAuth } from "./auth.js";
+import { createEntriesRouter } from "./entries.js";
 
 /**
  * Bounds how long `/health` waits on `deps.checkDb()`. This wraps the
@@ -16,6 +18,8 @@ export interface AppDeps {
   checkDb: () => Promise<boolean>;
   /** The single bearer token required for every request under /v1. */
   appToken: string;
+  /** Shared with the pg-boss derivation workers (see `jobs/`); used by `POST /v1/entries`. */
+  ingest: IngestDeps;
 }
 
 /**
@@ -43,6 +47,8 @@ export function createApp(deps: AppDeps): Hono {
 
   // Exists so the auth middleware has something to protect and test.
   v1.get("/me", (c) => c.json({ ok: true }, 200));
+
+  v1.route("/entries", createEntriesRouter(deps.ingest));
 
   app.route("/v1", v1);
 

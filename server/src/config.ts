@@ -11,6 +11,14 @@ const envSchema = z.object({
   DATABASE_URL: z.string().trim().min(1, "DATABASE_URL is required"),
   APP_TOKEN: z.string().trim().min(16, "APP_TOKEN must be at least 16 characters long"),
   PORT: z.coerce.number().int().positive().default(3000),
+  // Groq transcribes voice notes (T04's pg-boss worker runs in this same
+  // process), so it is required even though no HTTP route reads it
+  // directly.
+  GROQ_API_KEY: z.string().trim().min(1, "GROQ_API_KEY is required"),
+  // Directory where attachment files (photos, voice notes) are stored.
+  // Relative paths resolve against the process's current working
+  // directory. Gitignored; never committed.
+  DATA_DIR: z.string().trim().min(1).default("./data"),
 });
 
 export type Config = z.infer<typeof envSchema>;
