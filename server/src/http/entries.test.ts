@@ -8,6 +8,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createDb } from "../db/client.js";
 import { attachments, entries } from "../db/schema.js";
 import type { IngestDeps } from "../ingestion/entries.js";
+import { MAX_REQUEST_BODY_BYTES } from "../ingestion/mime.js";
 import { runVoiceJobAttempt } from "../jobs/voice-transcribe.js";
 import { createFileAttachmentStorage } from "../storage/attachment-storage.js";
 import type { Transcriber } from "../transcription/types.js";
@@ -230,6 +231,22 @@ describe("POST /v1/entries", () => {
     });
 
     expect(res.status).toBe(413);
+  });
+
+  it("rejects a request body over the global limit before parsing it", async () => {
+    const app = buildApp();
+    const oversized = Buffer.alloc(MAX_REQUEST_BODY_BYTES + 1);
+    const form = new FormData();
+    form.set("file", new File([oversized], "huge.m4a", { type: "audio/mp4" }));
+
+    const res = await app.request("/v1/entries", {
+      method: "POST",
+      headers: authHeaders,
+      body: form,
+    });
+
+    expect(res.status).toBe(413);
+    expect(await res.json()).toEqual({ ok: false, error: "request body too large" });
   });
 
   it("404s GET for an entry that does not exist", async () => {

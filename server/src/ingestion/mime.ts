@@ -34,6 +34,13 @@ const VOICE_MIME_TYPES = new Set([
 const PHOTO_MAX_BYTES = 15 * 1024 * 1024; // 15 MiB: generous for a phone screenshot/photo.
 const VOICE_MAX_BYTES = 25 * 1024 * 1024; // 25 MiB: Groq's documented free-tier file size cap.
 
+/**
+ * Upper bound for a whole request body, checked while streaming and before
+ * multipart parsing buffers it in memory. It is the largest per-kind cap
+ * plus 1 MiB of headroom for multipart framing and a caption.
+ */
+export const MAX_REQUEST_BODY_BYTES = VOICE_MAX_BYTES + 1024 * 1024;
+
 export interface MimeAllowlistResult {
   kind: AttachmentKind;
   maxBytes: number;

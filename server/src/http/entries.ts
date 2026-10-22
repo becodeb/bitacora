@@ -1,4 +1,5 @@
 import { type Context, Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import {
   createAttachmentEntry,
@@ -6,7 +7,7 @@ import {
   getEntryById,
   type IngestDeps,
 } from "../ingestion/entries.js";
-import { classifyAttachmentMime } from "../ingestion/mime.js";
+import { classifyAttachmentMime, MAX_REQUEST_BODY_BYTES } from "../ingestion/mime.js";
 
 const MULTIPART_CONTENT_TYPE_PREFIX = "multipart/form-data";
 
@@ -22,7 +23,13 @@ const jsonTextBodySchema = z.object({ text: z.string().trim().min(1) });
 export function createEntriesRouter(deps: IngestDeps): Hono {
   const router = new Hono();
 
-  router.post("/", async (c) => {
+  // Reject oversized bodies while streaming, before parseBody() buffers them.
+  const limitBody = bodyLimit({
+    maxSize: MAX_REQUEST_BODY_BYTES,
+    onError: (c) => c.json({ ok: false, error: "request body too large" }, 413),
+  });
+
+  router.post("/", limitBody, async (c) => {
     const contentType = c.req.header("content-type") ?? "";
 
     if (contentType.toLowerCase().startsWith(MULTIPART_CONTENT_TYPE_PREFIX)) {
