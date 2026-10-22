@@ -36,7 +36,7 @@
  * list as of 2026-10-22, so none of this is enforced today either way;
  * it is written for when/if that changes.
  */
-import { desc, sql } from "drizzle-orm";
+import { desc, eq, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { chatMessages } from "../db/schema.js";
 import type { AgentContentBlock, AgentMessage, AgentRole } from "./types.js";
@@ -47,12 +47,34 @@ const HISTORY_ROW_LIMIT = 50;
 export async function persistChatMessage(
   db: NodePgDatabase,
   message: { role: AgentRole | "tool"; content: AgentContentBlock[]; entryId?: string },
+): Promise<{ id: string }> {
+  const [row] = await db
+    .insert(chatMessages)
+    .values({
+      role: message.role,
+      content: message.content,
+      entryId: message.entryId ?? null,
+    })
+    .returning({ id: chatMessages.id });
+  if (!row) {
+    throw new Error("failed to persist chat message");
+  }
+  return { id: row.id };
+}
+
+/**
+ * Attaches the `[#n]` ref -> source entry id map to an already-persisted
+ * assistant message row, once the whole turn's `finalText` (and thus its
+ * citations) is known — `run-turn.ts` only has the full text after its
+ * tool loop ends, by which point the assistant row is already written.
+ */
+export async function attachCitationsToMessage(
+  db: NodePgDatabase,
+  messageId: string,
+  citations: Array<{ ref: string; sourceEntryId: string }>,
 ): Promise<void> {
-  await db.insert(chatMessages).values({
-    role: message.role,
-    content: message.content,
-    entryId: message.entryId ?? null,
-  });
+  if (citations.length === 0) return;
+  await db.update(chatMessages).set({ citations }).where(eq(chatMessages.id, messageId));
 }
 
 /**
@@ -92,6 +114,7 @@ export async function listChatHistory(db: NodePgDatabase, limit: number = HISTOR
       role: chatMessages.role,
       content: chatMessages.content,
       entryId: chatMessages.entryId,
+      citations: chatMessages.citations,
       createdAt: chatMessages.createdAt,
     })
     .from(chatMessages)

@@ -9,7 +9,12 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { agentRuns, topics } from "../db/schema.js";
 import type { MemoryServiceDeps } from "../memory/service.js";
 import type { createHybridSearch } from "../search/hybrid-search.js";
-import { loadRecentHistory, persistChatMessage, resolveMessageText } from "./chat-history.js";
+import {
+  attachCitationsToMessage,
+  loadRecentHistory,
+  persistChatMessage,
+  resolveMessageText,
+} from "./chat-history.js";
 import { fetchHitText } from "./content-lookup.js";
 import { estimateCostUsd } from "./pricing.js";
 import { buildContextBlock, buildSystemPrompt, type PromptContextHint } from "./prompt.js";
@@ -155,6 +160,11 @@ export async function runAgentTurn(
   let lastUsage: AgentUsage = { inputTokens: 0, outputTokens: 0 };
   let hitMaxIterations = false;
   let hitTokenBudget = false;
+  // The most recently persisted assistant `chat_messages` row: citations
+  // are only knowable from `finalText` once the whole tool loop ends
+  // (see `extractCitations` below), so the citations map is attached
+  // to this row after the fact rather than at insert time.
+  let lastAssistantMessageId: string | undefined;
 
   /**
    * History is trimmed once, before the loop — but tool exchanges
@@ -214,7 +224,11 @@ export async function runAgentTurn(
       latencyMillis,
     });
 
-    await persistChatMessage(deps.db, { role: "assistant", content: result.content });
+    const persistedAssistant = await persistChatMessage(deps.db, {
+      role: "assistant",
+      content: result.content,
+    });
+    lastAssistantMessageId = persistedAssistant.id;
 
     for (const block of result.content) {
       if (block.type === "text") {
@@ -277,6 +291,10 @@ export async function runAgentTurn(
 
   const finalText = textChunks.join("");
   const citations = extractCitations(finalText, tracker);
+
+  if (lastAssistantMessageId && citations.length > 0) {
+    await attachCitationsToMessage(deps.db, lastAssistantMessageId, citations);
+  }
 
   return {
     turnId,

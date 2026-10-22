@@ -278,6 +278,12 @@ export const chatMessages = pgTable(
     role: chatMessageRole("role").notNull(),
     content: jsonb("content").notNull(),
     entryId: uuid("entry_id").references(() => entries.id, { onDelete: "set null" }),
+    // The `[#n]` ref -> source entry id map for an assistant message's
+    // answer (see `agent/refs.ts`'s `extractCitations`), persisted so a
+    // reloaded transcript (`GET /v1/chat/history`) can still render
+    // citation chips — not just a live turn's SSE `citations` events.
+    // Always null for non-assistant rows.
+    citations: jsonb("citations").$type<Array<{ ref: string; sourceEntryId: string }>>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [index("chat_messages_entry_id_idx").on(table.entryId)],

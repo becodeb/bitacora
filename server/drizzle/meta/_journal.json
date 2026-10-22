@@ -50,6 +50,13 @@
       "when": 1792700921202,
       "tag": "0006_striped_peter_quill",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1792702820290,
+      "tag": "0007_colossal_pestilence",
+      "breakpoints": true
     }
   ]
 }

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import { PgBoss } from "pg-boss";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createDb } from "../db/client.js";
@@ -181,6 +181,21 @@ describe("runAgentTurn", () => {
 
     expect(result.citations).toHaveLength(1);
     expect(result.citations[0]?.sourceEntryId).toBe(hintEntryId);
+
+    // Citations are also persisted on the assistant's chat_messages row,
+    // so GET /v1/chat/history can still render citation chips after a
+    // reload (T10 work unit (a)) — not just during the live SSE turn.
+    const [assistantRow] = await db.orm
+      .select()
+      .from(chatMessages)
+      .where(eq(chatMessages.role, "assistant"))
+      .orderBy(desc(chatMessages.createdAt))
+      .limit(1);
+    const persistedCitations = assistantRow?.citations as
+      | Array<{ ref: string; sourceEntryId: string }>
+      | undefined;
+    expect(persistedCitations).toHaveLength(1);
+    expect(persistedCitations?.[0]?.sourceEntryId).toBe(hintEntryId);
   });
 
   it("stops without running tools on a refusal", async () => {
