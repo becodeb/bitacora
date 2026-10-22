@@ -104,6 +104,7 @@ Out:
 | When | Input |
 |---|---|
 | Done | `~/.credentials/bitacora.env` with `ANTHROPIC_API_KEY`, `GROQ_API_KEY` and `VOYAGE_API_KEY`. All three answered 200 on 2026-10-22. |
+| T05 | A payment method on the Voyage account, to lift the 3 requests/min limit. The 200M free tokens still apply. |
 | T10 | An Expo account. |
 | T11 | Authorization to create the GitHub repo, push and deploy. |
 | T12 | A Google Cloud project for OAuth. Publish it to "Production", because tokens expire after 7 days in Testing. |
@@ -133,6 +134,8 @@ Out:
     | 7 | `feat/ingestion-store` | `566fe88` T04 storage | 537 | over 400; schema change, storage and ingestion only work together |
     | 8 | `feat/derivation-jobs` | `344ed7c` T04 jobs | 674 | over 400; half is tests |
     | 9 | `feat/entries-http` | `3d58234` T04 HTTP, plus the body-limit fix | 484 + fix | |
+    | 10 | `feat/embeddings` | `9bf11b0` T05 embedder and jobs | 852 | over 400; adapter, queue and enqueue points belong together |
+    | 11 | `feat/hybrid-search` | `8f42dc5` T05 search, plus `77c2610` fix | 708 + 510 | over 400; search with its calibration fix |
 
   - The next task branches from the top of the stack.
 
@@ -158,7 +161,7 @@ The parent passes the task, this document and the verification commands to every
   - Post text, photo or voice.
   - Durable storage, with an acknowledgement only after the write.
   - Voice is transcribed with Groq; photos get OCR.
-- [ ] T05 Embeddings with Voyage, and hybrid search (FTS, vector and trigram, combined with RRF) with a relevance threshold. Delegated.
+- [x] T05 Embeddings with Voyage, and hybrid search (FTS, vector and trigram, combined with RRF) with a relevance threshold. Delegated. Commits `9bf11b0`, `8f42dc5`, `77c2610`.
 - [ ] T06 Agent turn. Delegated.
   - Pre-search hints.
   - Haiku 5.5 with tools: open topic, search, remember with dedup, update rule, undo.
@@ -250,6 +253,18 @@ The parent passes the task, this document and the verification commands to every
   - Real smoke run with the Groq key: a Spanish voice note was transcribed correctly ("El examen de análisis es el martes 12 de noviembre."). The sha256 matched.
   - Results: tests 115/115, typecheck/lint/build 0. Each slice also passes alone (93, 102, 114).
   - Keys: `~/.credentials/bitacora.env` exists (mode 600). The owner pasted the keys in chat, so rotating them is recommended.
+- **T05.**
+  - `Embedder` port with a Voyage adapter (`voyage-3.5`, 1024 dims, batches of 100). An `embed` pg-boss queue covers entries, memories and topics. Entries and memories are embedded once; topics are re-embedded on change.
+  - `hybridSearch` and `findHints` over memories, topics and entries. RRF with k=60. Superseded memories are excluded.
+  - Thresholds, calibrated on real data on 2026-10-22:
+    - **Vector:** cosine ≥ 0.50. With real `voyage-3.5`, related pairs scored 0.52–0.64 and unrelated pairs at most 0.44. The first guess of 0.75 rejected every related pair. "qué carrera hago" finds "Estudia Ingeniería en Sistemas" at 0.53 with no shared words.
+    - **FTS:** the whole message becomes an OR of Spanish lexemes. A hint needs at least min(2, n) matched lexemes.
+    - **Trigram:** per word (4+ chars), with `unaccent`, `word_similarity` ≥ 0.5. A hint needs at least min(2, n) matched words. "analsis" vs "Análisis" scores 0.545.
+    - Rationale: a single shared common word ("mañana") must not pull a memory into the prompt (acceptance criterion 4). Single-concept questions are the vector ranker's job.
+  - Real smoke run with Voyage found two defects; both were fixed in `77c2610`. Websearch AND semantics never matched a whole sentence, and whole-string trigrams never matched.
+  - **Voyage limit:** the account has no payment method, so it is capped at 3 requests/min and 10K tokens/min. The free 200M tokens still apply after adding one. The pre-search degrades to lexical-only on a 429; the embed jobs retry.
+  - Assessment: medium. Writer self-check plus parent spot check: tests 150/150, typecheck/lint/build 0.
+  - Open: a photo without OCR text or caption never gets an embedding (revisit in T07). Embed failures have no app-visible status.
 - **Pivot (rev 4).** The plan changed:
   - It moved to the chat-and-memory focus.
   - The Telegram option was rejected.
@@ -260,5 +275,6 @@ The parent passes the task, this document and the verification commands to every
 
 ## Next step
 
-1. Start T05 (Voyage embeddings and hybrid search) on a new branch stacked on `feat/entries-http`.
-2. The owner rotates the three API keys when convenient, because they were pasted in chat.
+1. Start T06 (agent turn) on a new branch stacked on `feat/hybrid-search`.
+2. The owner adds a payment method in Voyage to lift the 3 RPM limit (free tokens still apply).
+3. The owner rotates the three API keys when convenient, because they were pasted in chat.
