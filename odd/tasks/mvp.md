@@ -139,7 +139,8 @@ Out:
     | 12 | `feat/test-db` | `e6eea78` isolated test database | 134 | |
     | 13 | `feat/memory-service` | `19bdffb` T06 memory, dedup, undo | 912 | over 400; one service with its tests |
     | 14 | `feat/agent-loop` | `c4f0753` T06 agent loop | 1,486 | over 400; the loop, tools and prompt log only work together; `size:exception` |
-    | 15 | `feat/chat-sse` | `fb07055` T06 SSE, plus `1ecdea8` verifier fix | 521 + 1,178 | over 400; the fix touches all three T06 units |
+    | 15 | `feat/chat-sse` | `fb07055` T06 SSE, plus `1ecdea8` verifier fix | 521 + 1,178 | over 400; the fix touches all three T06 units; plus `dbd1437` doc |
+    | 16 | `feat/consolidation` | `f7de017` T08, plus `63a522f` verifier fix | 2,056 + 834 | over 400; the scheduler and admin trigger register both jobs, so no cohesive split was found; `size:exception` |
 
   - The next task branches from the top of the stack.
 
@@ -173,7 +174,7 @@ The parent passes the task, this document and the verification commands to every
 - [ ] T07 Image experiment. Inline plus delegated.
   - Run local OCR and Haiku vision on the owner's real screenshots.
   - Decide whether OCR alone is enough, and when to fall back to vision.
-- [ ] T08 Nightly consolidation and daily rollup job. Delegated.
+- [x] T08 Nightly consolidation and daily rollup job. Delegated. Commits `f7de017`, `63a522f`.
 - [ ] T09 Deploy to Coolify, with backups and secrets. Needs owner authorization (T11 row above).
 - [ ] T10 Expo app. Delegated.
   - Scaffold and EAS APK.
@@ -281,6 +282,18 @@ The parent passes the task, this document and the verification commands to every
   - Assessment: high (`hot_path`, `process_boundary`). The independent verifier first failed it with 2 blockers (orphan `tool_result` after trimming; thinking blocks dropped on replay), 2 majors (no budget check inside the loop; unvalidated supersede target) and 2 minors (raw error over SSE; concurrent turns). One scoped correction, `1ecdea8`. Re-verification: pass with notes.
   - The parent closed both notes against the live API on 2026-10-22. `tools: []` with `tool_choice` auto after a `tool_use` history is accepted, and a real thinking block replayed in a later turn is accepted.
   - Real smoke run: "Estudio Ingeniería en Sistemas en la UTN" called `remember` and got a voseo answer. A turn of two calls used about 700 input tokens, with 1,370 read from cache.
+- **T08.**
+  - **Schedule.** pg-boss runs the rollup at 03:30 and the consolidation at 04:00, America/Argentina/Buenos_Aires. The helper uses a fixed UTC-3, since there is no DST since 2009. `schedule()` is an upsert, so restarts do not duplicate it.
+  - **Daily rollup.** It covers the previous day's entries and chat text, and writes a diary entry in Rioplatense Spanish to `daily_rollups` (upsert, with `source_entry_ids`). Days with no content get no model call. Input is capped at 15K tokens.
+  - **Consolidation.**
+    - Duplicate pairs: cosine ≥ 0.85 or trigram ≥ 0.90, at most 50 per run, and nothing changed in the last 30 minutes.
+    - The judge returns `merge`, `keep_both` or one-supersedes-the-other. It sees no ids, and a failure falls back to `keep_both`.
+    - All changes are written to `change_log` under the run id, so `undoTurn(runId)` reverts them.
+    - Topic summaries are regenerated only when the topic's memories changed. Input is capped at 4K tokens.
+  - **Admin.** `POST /v1/admin/jobs/{daily-rollup|nightly-consolidation}/run`, with an optional `date`. Returns 409 if a run is already going.
+  - Assessment: high (`hot_path`). The verifier passed it with notes: one major (concurrent runs could merge twice) and two minors. One scoped correction, `63a522f`: advisory locks per job on a dedicated connection, `FOR UPDATE` on pairs, a capped summarizer input, and `stop_reason` `error`/`refusal` in `agent_runs`.
+  - Real smoke run: three synthetic entries produced a correct diary with its pending items. Cost was USD 0.0001–0.0002 per rollup, and a re-run updates the row (no duplicate).
+  - Results: tests 219/219, lint 0 warnings.
 - **Pivot (rev 4).** The plan changed:
   - It moved to the chat-and-memory focus.
   - The Telegram option was rejected.
@@ -291,6 +304,6 @@ The parent passes the task, this document and the verification commands to every
 
 ## Next step
 
-1. Start T08 (nightly consolidation and daily rollup) on a new branch stacked on `feat/chat-sse`. T07 needs the owner's real screenshots.
+1. Start T10 (Expo app) on a new branch stacked on `feat/consolidation`. The scaffold and code need no account; the EAS APK build needs the owner's Expo account. T07 needs the owner's real screenshots.
 2. The owner adds a payment method in Voyage to lift the 3 RPM limit (free tokens still apply).
 3. The owner rotates the three API keys when convenient, because they were pasted in chat.
