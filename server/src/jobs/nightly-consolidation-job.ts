@@ -9,6 +9,13 @@ export function registerNightlyConsolidationWorker(
 ): Promise<string> {
   return boss.work(NIGHTLY_CONSOLIDATION_QUEUE, async () => {
     const result = await runNightlyConsolidation(deps);
+    if (result.status === "already_running") {
+      // Should not normally happen for the scheduled firing itself (pg-boss
+      // does not run two instances of the same cron job concurrently), but
+      // can if an admin trigger is mid-run at 04:00 — logged, not an error.
+      console.log("nightly consolidation: already running, skipped this firing");
+      return;
+    }
     console.log(
       `nightly consolidation ${result.runId}: ${result.mergeDuplicates.candidatePairCount} candidate pair(s) ` +
         `(${JSON.stringify(result.mergeDuplicates.outcomes)}), ` +

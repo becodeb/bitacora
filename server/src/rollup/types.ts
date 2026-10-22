@@ -15,11 +15,20 @@ export interface RollupSummarizeParams {
 }
 
 export interface RollupSummarizeResult {
-  /** `null` when Claude refused or returned no usable text — the caller skips writing a rollup row for the day rather than storing an empty/garbage summary. */
+  /** `null` whenever `outcome` is not `"ok"` — the caller skips writing a rollup row for the day rather than storing an empty/garbage summary. */
   summary: string | null;
   usage: AgentUsage;
   /** The exact request sent, logged into `agent_runs.requestJson` the same way `agent/run-turn.ts` does. */
   requestJson: unknown;
+  /**
+   * `"ok"`: a real summary was produced. `"refusal"`: Claude's own
+   * `stop_reason: "refusal"` — a legitimate model decision, not a bug.
+   * `"error"`: anything else that kept a real summary from coming back
+   * (the API call itself threw, or the response had no usable text) —
+   * `rollup.ts` logs this distinctly into `agent_runs.stopReason` so it
+   * is never mistaken for a genuine `end_turn` completion.
+   */
+  outcome: "ok" | "refusal" | "error";
 }
 
 export interface RollupSummarizer {

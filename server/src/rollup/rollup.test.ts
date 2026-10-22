@@ -3,7 +3,7 @@ import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { createDb } from "../db/client.js";
 import { agentRuns, chatMessages, dailyRollups, entries } from "../db/schema.js";
 import { assertDefined } from "../test/assert.js";
-import { runDailyRollup } from "./rollup.js";
+import { type RollupDeps, runDailyRollup } from "./rollup.js";
 import { createScriptedRollupSummarizer } from "./test-helpers.js";
 
 const DEV_DATABASE_URL =
@@ -43,6 +43,10 @@ async function insertEntryAt(createdAt: Date, textBody: string): Promise<string>
   return entryId;
 }
 
+function depsWith(summarizer: ReturnType<typeof createScriptedRollupSummarizer>): RollupDeps {
+  return { db: db.orm, pool: db.pool, summarizer };
+}
+
 const DAY_WITH_CONTENT = "2026-01-15";
 const DAY_WITH_NO_CONTENT = "2026-01-16";
 
@@ -54,8 +58,10 @@ describe("runDailyRollup", () => {
       "Examen de sistemas el lunes.",
     );
 
-    const summarizer = createScriptedRollupSummarizer(["Rendiste el examen de sistemas."]);
-    const result = await runDailyRollup({ db: db.orm, summarizer }, { date: DAY_WITH_CONTENT });
+    const summarizer = createScriptedRollupSummarizer([
+      { summary: "Rendiste el examen de sistemas." },
+    ]);
+    const result = await runDailyRollup(depsWith(summarizer), { date: DAY_WITH_CONTENT });
 
     expect(result.status).toBe("created");
     expect(result.sourceEntryCount).toBe(1);
@@ -80,8 +86,8 @@ describe("runDailyRollup", () => {
   });
 
   it("skips a day with no content, making no model call and writing no row", async () => {
-    const summarizer = createScriptedRollupSummarizer(["should never be used"]);
-    const result = await runDailyRollup({ db: db.orm, summarizer }, { date: DAY_WITH_NO_CONTENT });
+    const summarizer = createScriptedRollupSummarizer([{ summary: "should never be used" }]);
+    const result = await runDailyRollup(depsWith(summarizer), { date: DAY_WITH_NO_CONTENT });
 
     expect(result.status).toBe("skipped_no_content");
     expect(summarizer.calls).toHaveLength(0);
@@ -97,8 +103,11 @@ describe("runDailyRollup", () => {
     createdDateLabels.push(DAY_WITH_CONTENT);
     await insertEntryAt(new Date(`${DAY_WITH_CONTENT}T09:00:00-03:00`), "Primera entrada del día.");
 
-    const summarizer = createScriptedRollupSummarizer(["Primer resumen.", "Segundo resumen."]);
-    const deps = { db: db.orm, summarizer };
+    const summarizer = createScriptedRollupSummarizer([
+      { summary: "Primer resumen." },
+      { summary: "Segundo resumen." },
+    ]);
+    const deps = depsWith(summarizer);
 
     const first = await runDailyRollup(deps, { date: DAY_WITH_CONTENT });
     expect(first.status).toBe("created");
@@ -119,8 +128,8 @@ describe("runDailyRollup", () => {
     createdDateLabels.push(DAY_WITH_CONTENT);
     await insertEntryAt(new Date(`${DAY_WITH_CONTENT}T11:00:00-03:00`), "Algo que pasó.");
 
-    const summarizer = createScriptedRollupSummarizer([null]);
-    const result = await runDailyRollup({ db: db.orm, summarizer }, { date: DAY_WITH_CONTENT });
+    const summarizer = createScriptedRollupSummarizer([{ outcome: "refusal" }]);
+    const result = await runDailyRollup(depsWith(summarizer), { date: DAY_WITH_CONTENT });
 
     expect(result.status).toBe("skipped_refusal");
     const rows = await db.orm
@@ -130,12 +139,80 @@ describe("runDailyRollup", () => {
     expect(rows).toHaveLength(0);
   });
 
+  it("logs stopReason 'error' (never 'end_turn') and skips the row when the summarizer call errors", async () => {
+    createdDateLabels.push(DAY_WITH_CONTENT);
+    await insertEntryAt(new Date(`${DAY_WITH_CONTENT}T12:00:00-03:00`), "Otra cosa que pasó.");
+
+    const summarizer = createScriptedRollupSummarizer([{ outcome: "error" }]);
+    const result = await runDailyRollup(depsWith(summarizer), { date: DAY_WITH_CONTENT });
+
+    expect(result.status).toBe("skipped_error");
+    const rows = await db.orm
+      .select()
+      .from(dailyRollups)
+      .where(sql`${dailyRollups.rollupDate} = ${DAY_WITH_CONTENT}`);
+    expect(rows).toHaveLength(0);
+
+    const [runRow] = await db.orm
+      .select()
+      .from(agentRuns)
+      .orderBy(sql`${agentRuns.createdAt} desc`)
+      .limit(1);
+    expect(runRow?.stopReason).toBe("error");
+  });
+
   it("defaults to yesterday (Buenos Aires) when no date is given", async () => {
     const summarizer = createScriptedRollupSummarizer([]);
-    const result = await runDailyRollup({ db: db.orm, summarizer });
+    const result = await runDailyRollup(depsWith(summarizer));
     // Whatever "yesterday" resolves to, it must be a real calendar date
     // label the function itself considers valid — this exercises the
     // default-date path without hardcoding "today" in the test.
     expect(result.dateLabel).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  it("guards concurrent runs with an advisory lock: the second caller reports already_running", async () => {
+    createdDateLabels.push(DAY_WITH_CONTENT);
+    await insertEntryAt(
+      new Date(`${DAY_WITH_CONTENT}T13:00:00-03:00`),
+      "Entrada para el test de lock.",
+    );
+
+    let releaseFirstCall: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      releaseFirstCall = resolve;
+    });
+
+    // A summarizer whose first call blocks until released, so the two
+    // `runDailyRollup` calls below are guaranteed to overlap instead of
+    // racing by luck.
+    let callCount = 0;
+    const blockingDeps: RollupDeps = {
+      db: db.orm,
+      pool: db.pool,
+      summarizer: {
+        async summarize(params) {
+          callCount += 1;
+          if (callCount === 1) await gate;
+          return {
+            summary: "Resumen del test de lock.",
+            usage: { inputTokens: 1, outputTokens: 1 },
+            requestJson: { params },
+            outcome: "ok",
+          };
+        },
+      },
+    };
+
+    const firstRun = runDailyRollup(blockingDeps, { date: DAY_WITH_CONTENT });
+    // Give the first call a moment to acquire the lock and start blocking.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const secondRun = runDailyRollup(blockingDeps, { date: DAY_WITH_CONTENT });
+
+    releaseFirstCall();
+    const [first, second] = await Promise.all([firstRun, secondRun]);
+
+    expect(first.status).toBe("created");
+    expect(second.status).toBe("already_running");
+    expect(callCount).toBe(1);
   });
 });

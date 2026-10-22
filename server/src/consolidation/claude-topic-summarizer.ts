@@ -33,6 +33,8 @@ function toAgentUsage(usage: Anthropic.Usage): AgentUsage {
   };
 }
 
+const EMPTY_USAGE: AgentUsage = { inputTokens: 0, outputTokens: 0 };
+
 export function createClaudeTopicSummarizer(
   options: ClaudeTopicSummarizerOptions,
 ): TopicSummarizer {
@@ -48,20 +50,26 @@ export function createClaudeTopicSummarizer(
     ].join("\n");
     const requestJson = { system, model: SUMMARIZER_MODEL, message: userMessage };
 
-    const response = await client.messages.create({
-      model: SUMMARIZER_MODEL,
-      max_tokens: SUMMARIZER_MAX_TOKENS,
-      thinking: { type: "adaptive" },
-      output_config: { effort: "low" },
-      system,
-      messages: [{ role: "user", content: userMessage }],
-    });
+    let response: Anthropic.Message;
+    try {
+      response = await client.messages.create({
+        model: SUMMARIZER_MODEL,
+        max_tokens: SUMMARIZER_MAX_TOKENS,
+        thinking: { type: "adaptive" },
+        output_config: { effort: "low" },
+        system,
+        messages: [{ role: "user", content: userMessage }],
+      });
+    } catch (error) {
+      console.error(`topic summarizer: Claude call failed for topic "${params.topicName}":`, error);
+      return { summary: null, usage: EMPTY_USAGE, requestJson, outcome: "error" };
+    }
 
     const usage = toAgentUsage(response.usage);
 
     if (response.stop_reason === "refusal") {
       console.error(`topic summarizer: Claude refused for topic "${params.topicName}"`);
-      return { summary: null, usage, requestJson };
+      return { summary: null, usage, requestJson, outcome: "refusal" };
     }
 
     const text = response.content
@@ -70,7 +78,14 @@ export function createClaudeTopicSummarizer(
       .join("")
       .trim();
 
-    return { summary: text.length > 0 ? text : null, usage, requestJson };
+    if (text.length === 0) {
+      console.error(
+        `topic summarizer: Claude returned no usable text for topic "${params.topicName}"`,
+      );
+      return { summary: null, usage, requestJson, outcome: "error" };
+    }
+
+    return { summary: text, usage, requestJson, outcome: "ok" };
   }
 
   return { summarize };

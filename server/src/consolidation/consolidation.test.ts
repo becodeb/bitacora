@@ -3,7 +3,7 @@ import { sql } from "drizzle-orm";
 import { PgBoss } from "pg-boss";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createDb } from "../db/client.js";
-import { changeLog, entries, memories, topics } from "../db/schema.js";
+import { agentRuns, changeLog, entries, memories, topics } from "../db/schema.js";
 import { createFakeEmbedder } from "../embeddings/test-helpers.js";
 import { EMBED_QUEUE } from "../jobs/queues.js";
 import { rememberFact, undoTurn } from "../memory/service.js";
@@ -12,6 +12,7 @@ import { assertDefined } from "../test/assert.js";
 import {
   type ConsolidationDeps,
   DEFAULT_RECENT_MEMORY_GUARD_MINUTES,
+  type RunNightlyConsolidationResult,
   runNightlyConsolidation,
 } from "./consolidation.js";
 import { createScriptedConsolidationJudge, createScriptedTopicSummarizer } from "./test-helpers.js";
@@ -83,7 +84,17 @@ function baseDeps(
   judge: ConsolidationDeps["judge"],
   topicSummarizer: ConsolidationDeps["topicSummarizer"],
 ): ConsolidationDeps {
-  return { db: db.orm, boss, judge, topicSummarizer };
+  return { db: db.orm, pool: db.pool, boss, judge, topicSummarizer };
+}
+
+/** Narrows a run result to its `"completed"` shape, failing loudly (not silently) if the run was instead skipped as `already_running`. */
+function assertCompleted(
+  result: RunNightlyConsolidationResult,
+): Extract<RunNightlyConsolidationResult, { status: "completed" }> {
+  if (result.status !== "completed") {
+    throw new Error(`expected a completed run, got status "${result.status}"`);
+  }
+  return result;
 }
 
 describe("runNightlyConsolidation: merge duplicates", () => {
@@ -98,7 +109,7 @@ describe("runNightlyConsolidation: merge duplicates", () => {
       { action: "merge", mergedContent: "Estudia Ingeniería en Sistemas en la UTN." },
     ]);
     const topicSummarizer = createScriptedTopicSummarizer([]);
-    const result = await runNightlyConsolidation(baseDeps(judge, topicSummarizer));
+    const result = assertCompleted(await runNightlyConsolidation(baseDeps(judge, topicSummarizer)));
     createdActionGroupIds.push(result.runId);
 
     expect(result.mergeDuplicates.candidatePairCount).toBeGreaterThanOrEqual(1);
@@ -146,7 +157,7 @@ describe("runNightlyConsolidation: merge duplicates", () => {
 
     const judge = createScriptedConsolidationJudge([{ action: "keep_both" }]);
     const topicSummarizer = createScriptedTopicSummarizer([]);
-    const result = await runNightlyConsolidation(baseDeps(judge, topicSummarizer));
+    const result = assertCompleted(await runNightlyConsolidation(baseDeps(judge, topicSummarizer)));
 
     expect(result.mergeDuplicates.outcomes.kept_both).toBeGreaterThanOrEqual(1);
 
@@ -173,7 +184,7 @@ describe("runNightlyConsolidation: merge duplicates", () => {
 
     const judge = createScriptedConsolidationJudge([{ action: "a_supersedes_b" }]);
     const topicSummarizer = createScriptedTopicSummarizer([]);
-    const result = await runNightlyConsolidation(baseDeps(judge, topicSummarizer));
+    const result = assertCompleted(await runNightlyConsolidation(baseDeps(judge, topicSummarizer)));
     createdActionGroupIds.push(result.runId);
 
     expect(result.mergeDuplicates.outcomes.a_supersedes_b).toBeGreaterThanOrEqual(1);
@@ -224,6 +235,100 @@ describe("runNightlyConsolidation: merge duplicates", () => {
     expect(afterA?.validTo).toBeNull();
     expect(afterB?.validTo).toBeNull();
   });
+
+  it("logs stopReason 'error' (never 'tool_use') when the judge call errors, and leaves memories untouched", async () => {
+    const entryA = await makeEntry();
+    const entryB = await makeEntry();
+    const content = "El dueño cambió de trabajo en abril.";
+    const idA = await makeOldMemory(content, entryA);
+    const idB = await makeOldMemory(content, entryB);
+
+    // Scripted to fall back to keep_both via an "error" outcome — this
+    // is the case a real `createClaudeConsolidationJudge` call hits when
+    // the API call itself throws. `outcomes` must be aligned 1:1 with
+    // however many candidate pairs this specific pair actually produces
+    // (just this one, since there is only one pair in the DB at this
+    // point in the suite's run).
+    const judge = createScriptedConsolidationJudge([{ action: "keep_both" }], {
+      outcomes: ["error"],
+    });
+    const topicSummarizer = createScriptedTopicSummarizer([]);
+    const result = assertCompleted(await runNightlyConsolidation(baseDeps(judge, topicSummarizer)));
+
+    expect(result.mergeDuplicates.outcomes.kept_both).toBeGreaterThanOrEqual(1);
+    const [rowA] = await db.orm.select().from(memories).where(sql`${memories.id} = ${idA}`);
+    const [rowB] = await db.orm.select().from(memories).where(sql`${memories.id} = ${idB}`);
+    expect(rowA?.validTo).toBeNull();
+    expect(rowB?.validTo).toBeNull();
+
+    const errorRuns = await db.orm
+      .select()
+      .from(agentRuns)
+      .where(sql`${agentRuns.turnId} = ${result.runId}`);
+    expect(errorRuns.some((row) => row.stopReason === "error")).toBe(true);
+  });
+
+  it("guards concurrent runs with an advisory lock: exactly one merges, the other reports already_running", async () => {
+    const entryA = await makeEntry();
+    const entryB = await makeEntry();
+    const content = "El dueño se mudó a un depto nuevo en julio.";
+    const idA = await makeOldMemory(content, entryA);
+    const idB = await makeOldMemory(content, entryB);
+
+    let releaseFirstJudgeCall: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      releaseFirstJudgeCall = resolve;
+    });
+
+    let judgeCallCount = 0;
+    const blockingDeps: ConsolidationDeps = {
+      db: db.orm,
+      pool: db.pool,
+      boss,
+      judge: {
+        async decide(candidate) {
+          judgeCallCount += 1;
+          if (judgeCallCount === 1) await gate;
+          return {
+            decision: { action: "merge", mergedContent: "Se mudó a un depto nuevo en julio." },
+            usage: { inputTokens: 1, outputTokens: 1 },
+            requestJson: { candidate },
+            outcome: "ok",
+          };
+        },
+      },
+      topicSummarizer: createScriptedTopicSummarizer([]),
+    };
+
+    const firstRun = runNightlyConsolidation(blockingDeps);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const secondRun = runNightlyConsolidation(blockingDeps);
+
+    releaseFirstJudgeCall();
+    const [first, second] = await Promise.all([firstRun, secondRun]);
+
+    expect(judgeCallCount).toBe(1);
+    const completedResults = [first, second].filter(
+      (r): r is Extract<RunNightlyConsolidationResult, { status: "completed" }> =>
+        r.status === "completed",
+    );
+    const skippedResults = [first, second].filter((r) => r.status === "already_running");
+    expect(completedResults).toHaveLength(1);
+    expect(skippedResults).toHaveLength(1);
+    expect(completedResults[0]?.mergeDuplicates.outcomes.merged).toBe(1);
+    createdActionGroupIds.push(assertDefined(completedResults[0]).runId);
+
+    const mergedRows = await db.orm
+      .select()
+      .from(memories)
+      .where(sql`${memories.content} = 'Se mudó a un depto nuevo en julio.'`);
+    expect(mergedRows).toHaveLength(1);
+
+    const [rowA] = await db.orm.select().from(memories).where(sql`${memories.id} = ${idA}`);
+    const [rowB] = await db.orm.select().from(memories).where(sql`${memories.id} = ${idB}`);
+    expect(rowA?.validTo).not.toBeNull();
+    expect(rowB?.validTo).not.toBeNull();
+  });
 });
 
 describe("runNightlyConsolidation: topic summaries", () => {
@@ -241,8 +346,12 @@ describe("runNightlyConsolidation: topic summaries", () => {
 
     const noPairsJudge = createScriptedConsolidationJudge([]);
 
-    const firstSummarizer = createScriptedTopicSummarizer(["Resumen inicial del tema."]);
-    const firstResult = await runNightlyConsolidation(baseDeps(noPairsJudge, firstSummarizer));
+    const firstSummarizer = createScriptedTopicSummarizer([
+      { summary: "Resumen inicial del tema." },
+    ]);
+    const firstResult = assertCompleted(
+      await runNightlyConsolidation(baseDeps(noPairsJudge, firstSummarizer)),
+    );
     expect(firstResult.topicSummaries.refreshedTopicCount).toBe(1);
     expect(firstSummarizer.calls).toHaveLength(1);
     expect(firstSummarizer.calls[0]?.topicName).toBe(topicName);
@@ -253,12 +362,44 @@ describe("runNightlyConsolidation: topic summaries", () => {
 
     // No new memory was written for this topic since the refresh above,
     // so a second run must not call the summarizer again.
-    const secondSummarizer = createScriptedTopicSummarizer(["should never be used"]);
-    const secondResult = await runNightlyConsolidation(baseDeps(noPairsJudge, secondSummarizer));
+    const secondSummarizer = createScriptedTopicSummarizer([{ summary: "should never be used" }]);
+    const secondResult = assertCompleted(
+      await runNightlyConsolidation(baseDeps(noPairsJudge, secondSummarizer)),
+    );
     expect(secondResult.topicSummaries.staleTopicCount).toBe(0);
     expect(secondSummarizer.calls).toHaveLength(0);
 
     const [afterSecond] = await db.orm.select().from(topics).where(sql`${topics.id} = ${topicId}`);
     expect(afterSecond?.summary).toBe("Resumen inicial del tema.");
+  });
+
+  it("logs stopReason 'error' when the topic summarizer call errors, and leaves the old summary in place", async () => {
+    const entryId = await makeEntry();
+    const memoryJudge = createScriptedJudge([{ action: "add" }]);
+    const topicName = `consolidation-test-topic-error-${randomUUID()}`;
+
+    const rememberResult = await rememberFact(
+      { db: db.orm, boss, embedder: createFakeEmbedder(), judge: memoryJudge },
+      { content: "Tiene un perro.", topicName, sourceEntryId: entryId, turnId: randomUUID() },
+    );
+    const topicId = assertDefined(rememberResult.topicId);
+    createdTopicIds.push(topicId);
+
+    const noPairsJudge = createScriptedConsolidationJudge([]);
+    const erroringSummarizer = createScriptedTopicSummarizer([{ outcome: "error" }]);
+    const result = assertCompleted(
+      await runNightlyConsolidation(baseDeps(noPairsJudge, erroringSummarizer)),
+    );
+    expect(result.topicSummaries.refreshedTopicCount).toBe(0);
+
+    const [afterError] = await db.orm.select().from(topics).where(sql`${topics.id} = ${topicId}`);
+    expect(afterError?.summary).toBeNull();
+    expect(afterError?.summaryGeneratedAt).toBeNull();
+
+    const runRows = await db.orm
+      .select()
+      .from(agentRuns)
+      .where(sql`${agentRuns.turnId} = ${result.runId}`);
+    expect(runRows.some((row) => row.stopReason === "error")).toBe(true);
   });
 });

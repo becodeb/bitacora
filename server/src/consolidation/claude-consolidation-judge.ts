@@ -101,10 +101,11 @@ export function createClaudeConsolidationJudge(
     const requestJson = { system, tools: [RECORD_DECISION_TOOL.name], message: userMessage };
     const fallback = (
       reason: string,
+      outcome: "refusal" | "error",
       usage: AgentUsage = EMPTY_USAGE,
     ): ConsolidationDecisionResult => {
       console.error(`consolidation judge: ${reason}, defaulting to keep_both`);
-      return { decision: { action: "keep_both" }, usage, requestJson };
+      return { decision: { action: "keep_both" }, usage, requestJson, outcome };
     };
 
     let response: Anthropic.Message;
@@ -118,13 +119,13 @@ export function createClaudeConsolidationJudge(
         messages: [{ role: "user", content: userMessage }],
       });
     } catch (error) {
-      return fallback(`Claude call failed (${String(error)})`);
+      return fallback(`Claude call failed (${String(error)})`, "error");
     }
 
     const usage = toAgentUsage(response.usage);
 
     if (response.stop_reason === "refusal") {
-      return fallback("Claude refused", usage);
+      return fallback("Claude refused", "refusal", usage);
     }
 
     const toolUse = response.content.find(
@@ -132,26 +133,26 @@ export function createClaudeConsolidationJudge(
         block.type === "tool_use" && block.name === "record_consolidation_decision",
     );
     if (!toolUse) {
-      return fallback("no record_consolidation_decision tool call", usage);
+      return fallback("no record_consolidation_decision tool call", "error", usage);
     }
 
     const parsed = decisionInputSchema.safeParse(toolUse.input);
     if (!parsed.success) {
-      return fallback(`tool input failed validation (${parsed.error.message})`, usage);
+      return fallback(`tool input failed validation (${parsed.error.message})`, "error", usage);
     }
 
     if (parsed.data.action === "merge") {
       if (!parsed.data.merged_content) {
-        return fallback("merge with no merged_content", usage);
+        return fallback("merge with no merged_content", "error", usage);
       }
       const decision: ConsolidationDecision = {
         action: "merge",
         mergedContent: parsed.data.merged_content,
       };
-      return { decision, usage, requestJson };
+      return { decision, usage, requestJson, outcome: "ok" };
     }
 
-    return { decision: { action: parsed.data.action }, usage, requestJson };
+    return { decision: { action: parsed.data.action }, usage, requestJson, outcome: "ok" };
   }
 
   return { decide };

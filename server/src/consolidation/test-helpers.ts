@@ -16,13 +16,20 @@ const DEFAULT_USAGE: AgentUsage = { inputTokens: 5, outputTokens: 5 };
 
 /**
  * A scriptable fake `ConsolidationJudge`: returns the next scripted
- * decision (or `fallback`, default `keep_both`) on each call, in order.
- * Records every call's candidate in `calls`.
+ * decision (or `fallback`, default `keep_both`) on each call, in order,
+ * tagged with `outcome` (default `"ok"` — pass `"refusal"`/`"error"` to
+ * simulate a judge call that fell back rather than reaching a genuine
+ * decision; see `types.ts`'s own doc comment). Records every call's
+ * candidate in `calls`.
  */
 export function createScriptedConsolidationJudge(
   decisions: ConsolidationDecision[],
-  fallback: ConsolidationDecision = { action: "keep_both" },
+  options: {
+    fallback?: ConsolidationDecision;
+    outcomes?: Array<"ok" | "refusal" | "error">;
+  } = {},
 ): ConsolidationJudge & { calls: ConsolidationCandidate[] } {
+  const fallback = options.fallback ?? { action: "keep_both" };
   const calls: ConsolidationCandidate[] = [];
   let index = 0;
 
@@ -31,15 +38,19 @@ export function createScriptedConsolidationJudge(
     async decide(candidate) {
       calls.push(candidate);
       const decision = decisions[index] ?? fallback;
+      const outcome = options.outcomes?.[index] ?? "ok";
       index += 1;
-      return { decision, usage: DEFAULT_USAGE, requestJson: { candidate } };
+      return { decision, usage: DEFAULT_USAGE, requestJson: { candidate }, outcome };
     },
   };
 }
 
+/** A real summary, or a non-`"ok"` outcome (refusal / error — see `types.ts`'s own doc comment). Same shape as `rollup/test-helpers.ts`'s `ScriptedRollupOutcome`. */
+export type ScriptedTopicSummaryOutcome = { summary: string } | { outcome: "refusal" | "error" };
+
 /** A scriptable fake `TopicSummarizer`, same shape as `createScriptedConsolidationJudge`. */
 export function createScriptedTopicSummarizer(
-  summaries: Array<string | null>,
+  scripts: ScriptedTopicSummaryOutcome[],
 ): TopicSummarizer & { calls: TopicSummarizeParams[] } {
   const calls: TopicSummarizeParams[] = [];
   let index = 0;
@@ -48,9 +59,22 @@ export function createScriptedTopicSummarizer(
     calls,
     async summarize(params) {
       calls.push(params);
-      const summary = summaries[index] ?? null;
+      const script = scripts[index] ?? { outcome: "error" as const };
       index += 1;
-      return { summary, usage: DEFAULT_USAGE, requestJson: { params } };
+      if ("summary" in script) {
+        return {
+          summary: script.summary,
+          usage: DEFAULT_USAGE,
+          requestJson: { params },
+          outcome: "ok",
+        };
+      }
+      return {
+        summary: null,
+        usage: DEFAULT_USAGE,
+        requestJson: { params },
+        outcome: script.outcome,
+      };
     },
   };
 }

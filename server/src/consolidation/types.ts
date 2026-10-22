@@ -38,6 +38,16 @@ export interface ConsolidationDecisionResult {
   usage: AgentUsage;
   /** Logged into `agent_runs.requestJson`, same convention as `agent/run-turn.ts` and `rollup/claude-rollup.ts`. */
   requestJson: unknown;
+  /**
+   * `"ok"`: `decision` is a genuine model decision reached via a valid
+   * tool call. `"refusal"`: Claude's own `stop_reason: "refusal"`.
+   * `"error"`: anything else that forced the `keep_both` fallback (the
+   * API call threw, no tool call came back, or its input failed
+   * validation) — `decision` is still `keep_both` in this case, but
+   * `consolidation.ts` logs this outcome into `agent_runs.stopReason`
+   * instead of letting a fallback look like a real `keep_both` call.
+   */
+  outcome: "ok" | "refusal" | "error";
 }
 
 export interface ConsolidationJudge {
@@ -51,10 +61,12 @@ export interface TopicSummarizeParams {
 }
 
 export interface TopicSummarizeResult {
-  /** `null` on refusal/empty output — the caller skips the write and leaves the old summary + `summaryGeneratedAt` in place, so a transient bad call is retried on the next nightly run rather than wiping a good summary. */
+  /** `null` whenever `outcome` is not `"ok"` — the caller skips the write and leaves the old summary + `summaryGeneratedAt` in place, so a transient bad call is retried on the next nightly run rather than wiping a good summary. */
   summary: string | null;
   usage: AgentUsage;
   requestJson: unknown;
+  /** Same three-way split as `ConsolidationDecisionResult.outcome` above. */
+  outcome: "ok" | "refusal" | "error";
 }
 
 export interface TopicSummarizer {

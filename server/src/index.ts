@@ -69,10 +69,12 @@ async function main(): Promise<void> {
 
   const rollupDeps: RollupDeps = {
     db: orm,
+    pool,
     summarizer: createClaudeRollupSummarizer({ apiKey: config.ANTHROPIC_API_KEY }),
   };
   const consolidationDeps: ConsolidationDeps = {
     db: orm,
+    pool,
     boss,
     judge: createClaudeConsolidationJudge({ apiKey: config.ANTHROPIC_API_KEY }),
     topicSummarizer: createClaudeTopicSummarizer({ apiKey: config.ANTHROPIC_API_KEY }),

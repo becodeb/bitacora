@@ -9,13 +9,17 @@
  * update does.
  */
 import { randomUUID } from "node:crypto";
-import { eq, sql } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
+import type { Pool } from "pg";
 import type { PgBoss } from "pg-boss";
 import { estimateCostUsd } from "../agent/pricing.js";
+import { estimateTokensForText } from "../agent/token-budget.js";
 import type { AgentUsage } from "../agent/types.js";
 import { agentRuns, changeLog, memories, topics } from "../db/schema.js";
 import { enqueueEmbedJob } from "../jobs/embed.js";
+import { NIGHTLY_CONSOLIDATION_LOCK_KEY } from "../jobs/lock-keys.js";
+import { runWithAdvisoryLock } from "../lib/advisory-lock.js";
 import { bumpTopicMemoriesChanged } from "../memory/service.js";
 import type {
   ConsolidationCandidate,
@@ -41,9 +45,21 @@ export const MAX_CANDIDATE_PAIRS_PER_RUN = 50;
 export const DEFAULT_RECENT_MEMORY_GUARD_MINUTES = 30;
 /** How many of a topic's live memories are sent to the topic summarizer — bounds both the prompt size and the cost of a topic with a very long history. */
 const TOPIC_SUMMARY_MEMORY_LIMIT = 50;
+/**
+ * Upper bound on the topic summarizer's input, in the same char-based
+ * estimate `rollup.ts` uses for its own content budget
+ * (`agent/token-budget.ts`'s `estimateTokensForText`). `TOPIC_SUMMARY_MEMORY_LIMIT`
+ * above already caps how many memories are considered, but a topic with
+ * a handful of very long memories could still blow past a reasonable
+ * prompt size — this is the belt to that limit's suspenders.
+ */
+const TOPIC_SUMMARY_MAX_CONTENT_TOKENS = 4_000;
+const TOPIC_SUMMARY_TRUNCATION_MARKER = "(... más memorias truncadas por espacio ...)";
 
 export interface ConsolidationDeps {
   db: NodePgDatabase;
+  /** Used only to take the run-level advisory lock below (see `lib/advisory-lock.ts`) — never for ordinary queries, which go through `db`. */
+  pool: Pool;
   boss: PgBoss;
   judge: ConsolidationJudge;
   topicSummarizer: TopicSummarizer;
@@ -114,16 +130,36 @@ function toJudgeCandidate(pair: CandidatePairRow): ConsolidationCandidate {
   };
 }
 
-async function isLiveMemory(
+/**
+ * Locks both candidate rows with `SELECT ... FOR UPDATE` and reports
+ * which are still live, inside the caller's transaction. This is
+ * defense in depth alongside the run-level advisory lock in
+ * `runNightlyConsolidation`: that lock already keeps two whole runs
+ * from overlapping, but locking the specific rows here also protects
+ * against a live chat turn (`agent/run-turn.ts` via
+ * `memory/service.ts`) racing this exact pair, and blocks a second
+ * transaction within the same process from reading a stale snapshot
+ * instead of waiting. Ids are sorted before locking so two calls that
+ * both touch the same two rows always take the locks in the same
+ * order, which avoids a deadlock between them.
+ */
+async function lockLiveMemories(
   // biome-ignore lint/suspicious/noExplicitAny: a Drizzle transaction, same structural-typing limitation as memory/service.ts.
   tx: any,
-  id: string,
-): Promise<boolean> {
-  const [row] = await tx
-    .select({ validTo: memories.validTo })
+  ids: [string, string],
+): Promise<{ isLive: (id: string) => boolean }> {
+  const sortedIds = [...ids].sort();
+  const rows = await tx
+    .select({ id: memories.id, validTo: memories.validTo })
     .from(memories)
-    .where(eq(memories.id, id));
-  return Boolean(row) && row.validTo === null;
+    .where(inArray(memories.id, sortedIds))
+    .for("update");
+  const liveIds = new Set(
+    (rows as Array<{ id: string; validTo: Date | null }>)
+      .filter((row) => row.validTo === null)
+      .map((row) => row.id),
+  );
+  return { isLive: (id: string) => liveIds.has(id) };
 }
 
 async function logChangeLog(
@@ -186,11 +222,8 @@ async function applyDecision(
   }
 
   return deps.db.transaction(async (tx) => {
-    const [liveA, liveB] = await Promise.all([
-      isLiveMemory(tx, pair.idA),
-      isLiveMemory(tx, pair.idB),
-    ]);
-    if (!liveA || !liveB) {
+    const { isLive } = await lockLiveMemories(tx, [pair.idA, pair.idB]);
+    if (!isLive(pair.idA) || !isLive(pair.idB)) {
       return "stale";
     }
 
@@ -293,20 +326,54 @@ async function mergeDuplicates(
 
   for (const pair of pairs) {
     const startedAt = Date.now();
-    const { decision, usage, requestJson } = await deps.judge.decide(toJudgeCandidate(pair));
+    const {
+      decision,
+      usage,
+      requestJson,
+      outcome: judgeOutcome,
+    } = await deps.judge.decide(toJudgeCandidate(pair));
     await logAgentRun(deps.db, {
       turnId: runId,
       requestJson,
-      stopReason: decision.action === "keep_both" ? "end_turn" : "tool_use",
+      // A genuine `keep_both` decision and the fallback's own
+      // `keep_both` look identical on `decision` alone — `judgeOutcome`
+      // is what actually distinguishes a real tool-call decision from a
+      // refusal or an error that forced the safe default (see
+      // `types.ts`'s own doc comment on `ConsolidationDecisionResult.outcome`).
+      stopReason: judgeOutcome === "ok" ? "tool_use" : judgeOutcome,
       usage,
       latencyMillis: Date.now() - startedAt,
     });
 
-    const outcome = await applyDecision(deps, runId, pair, decision);
-    outcomes[outcome] += 1;
+    const pairOutcome = await applyDecision(deps, runId, pair, decision);
+    outcomes[pairOutcome] += 1;
   }
 
   return { runId, candidatePairCount: pairs.length, outcomes };
+}
+
+/**
+ * Caps a topic's live-memory contents to `TOPIC_SUMMARY_MAX_CONTENT_TOKENS`,
+ * same conservative char-based estimate `rollup.ts` budgets its own
+ * content with (`agent/token-budget.ts`'s `estimateTokensForText`).
+ * Drops from the END of the list — `contents` is already newest-first
+ * (see `refreshTopicSummaries`'s own query), so this keeps the most
+ * recent memories and trims the oldest ones first, appending a marker
+ * so the summarizer's prompt makes the truncation visible rather than
+ * silently reading as a topic with fewer memories than it actually has.
+ */
+function boundMemoryContents(contents: string[]): { contents: string[]; truncated: boolean } {
+  let tokens = 0;
+  const kept: string[] = [];
+  for (const content of contents) {
+    const contentTokens = estimateTokensForText(content);
+    if (tokens + contentTokens > TOPIC_SUMMARY_MAX_CONTENT_TOKENS) {
+      return { contents: [...kept, TOPIC_SUMMARY_TRUNCATION_MARKER], truncated: true };
+    }
+    tokens += contentTokens;
+    kept.push(content);
+  }
+  return { contents: kept, truncated: false };
 }
 
 interface StaleTopic {
@@ -357,20 +424,24 @@ async function refreshTopicSummaries(
       continue;
     }
 
+    const { contents: boundedContents } = boundMemoryContents(
+      liveMemories.map((row) => row.content),
+    );
+
     const startedAt = Date.now();
     const result = await deps.topicSummarizer.summarize({
       topicName: topic.name,
-      memoryContents: liveMemories.map((row) => row.content),
+      memoryContents: boundedContents,
     });
     await logAgentRun(deps.db, {
       turnId: runId,
       requestJson: result.requestJson,
-      stopReason: result.summary ? "end_turn" : "refusal",
+      stopReason: result.outcome === "ok" ? "end_turn" : result.outcome,
       usage: result.usage,
       latencyMillis: Date.now() - startedAt,
     });
 
-    if (!result.summary) {
+    if (result.outcome !== "ok" || !result.summary) {
       // Leave the old summary and `summaryGeneratedAt` alone: a
       // transient bad call is retried on the next nightly run, per
       // `TopicSummarizeResult`'s own doc comment — not marked done.
@@ -394,10 +465,22 @@ async function refreshTopicSummaries(
   return { staleTopicCount: staleTopics.length, refreshedTopicCount };
 }
 
-export interface RunNightlyConsolidationResult {
-  runId: string;
-  mergeDuplicates: MergeDuplicatesResult;
-  topicSummaries: RefreshTopicSummariesResult;
+export type RunNightlyConsolidationResult =
+  | {
+      status: "completed";
+      runId: string;
+      mergeDuplicates: MergeDuplicatesResult;
+      topicSummaries: RefreshTopicSummariesResult;
+    }
+  | { status: "already_running" };
+
+async function runNightlyConsolidationUnlocked(
+  deps: ConsolidationDeps,
+): Promise<Omit<Extract<RunNightlyConsolidationResult, { status: "completed" }>, "status">> {
+  const runId = randomUUID();
+  const mergeResult = await mergeDuplicates(deps, runId);
+  const topicResult = await refreshTopicSummaries(deps, runId);
+  return { runId, mergeDuplicates: mergeResult, topicSummaries: topicResult };
 }
 
 /**
@@ -408,12 +491,25 @@ export interface RunNightlyConsolidationResult {
  * duplicate-merge mutations are grouped under this call's own fresh
  * `runId` and are each independently undoable; topic summary refreshes
  * are idempotent regenerations.
+ *
+ * Guarded by a run-level Postgres advisory lock
+ * (`NIGHTLY_CONSOLIDATION_LOCK_KEY` — see `lib/advisory-lock.ts`): if
+ * the 04:00 schedule fires while an admin trigger (or another
+ * concurrent trigger) is already running this job, the second caller
+ * returns `{ status: "already_running" }` immediately instead of
+ * racing the first run's reads of the same candidate pairs — the
+ * per-pair row lock in `applyDecision` is defense in depth for races
+ * this lock does not cover (e.g. a live chat turn), not a substitute
+ * for it.
  */
 export async function runNightlyConsolidation(
   deps: ConsolidationDeps,
 ): Promise<RunNightlyConsolidationResult> {
-  const runId = randomUUID();
-  const mergeResult = await mergeDuplicates(deps, runId);
-  const topicResult = await refreshTopicSummaries(deps, runId);
-  return { runId, mergeDuplicates: mergeResult, topicSummaries: topicResult };
+  const locked = await runWithAdvisoryLock(deps.pool, NIGHTLY_CONSOLIDATION_LOCK_KEY, () =>
+    runNightlyConsolidationUnlocked(deps),
+  );
+  if (!locked.ran) {
+    return { status: "already_running" };
+  }
+  return { status: "completed", ...locked.result };
 }

@@ -8,10 +8,13 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, gte, lt } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
+import type { Pool } from "pg";
 import { estimateCostUsd } from "../agent/pricing.js";
 import { estimateTokensForText } from "../agent/token-budget.js";
 import type { AgentContentBlock } from "../agent/types.js";
 import { agentRuns, chatMessages, dailyRollups, entries } from "../db/schema.js";
+import { DAILY_ROLLUP_LOCK_KEY } from "../jobs/lock-keys.js";
+import { runWithAdvisoryLock } from "../lib/advisory-lock.js";
 import {
   buenosAiresDayRangeUtc,
   isValidDateLabel,
@@ -32,6 +35,8 @@ const TRUNCATION_MARKER =
 
 export interface RollupDeps {
   db: NodePgDatabase;
+  /** Used only to take the run-level advisory lock below (see `lib/advisory-lock.ts`) — never for ordinary queries, which go through `db`. */
+  pool: Pool;
   summarizer: RollupSummarizer;
 }
 
@@ -40,7 +45,13 @@ export interface RunDailyRollupParams {
   date?: string;
 }
 
-export type RunDailyRollupStatus = "created" | "updated" | "skipped_no_content" | "skipped_refusal";
+export type RunDailyRollupStatus =
+  | "created"
+  | "updated"
+  | "skipped_no_content"
+  | "skipped_refusal"
+  | "skipped_error"
+  | "already_running";
 
 export interface RunDailyRollupResult {
   dateLabel: string;
@@ -153,24 +164,15 @@ async function gatherDayContent(
   return { sourceEntryIds: [...sourceEntryIdSet], content, truncated };
 }
 
-/**
- * Runs (or re-runs) the daily rollup for one Buenos-Aires-local date.
- * Idempotent: re-running the same date with the same underlying content
- * upserts the existing row (`daily_rollups.rollup_date` is unique) and
- * does not create a duplicate. Logs the summarizer call into
- * `agent_runs` even on a skipped-by-refusal day, so the cost/attempt is
- * still visible — but never on a skipped-no-content day, which makes no
- * model call at all.
- */
-export async function runDailyRollup(
-  deps: RollupDeps,
-  params: RunDailyRollupParams = {},
-): Promise<RunDailyRollupResult> {
-  const dateLabel = params.date ?? yesterdayDateLabel();
-  if (!isValidDateLabel(dateLabel)) {
-    throw new Error(`invalid date for daily rollup: ${dateLabel}`);
-  }
+/** Maps a summarizer `outcome` to the `agent_runs.stopReason` it is logged under — `"error"` covers both a thrown API call and an unusable response, so it is never confused with a genuine `"end_turn"` completion (see `types.ts`'s own doc comment on `RollupSummarizeResult.outcome`). */
+function stopReasonFor(outcome: "ok" | "refusal" | "error"): string {
+  return outcome === "ok" ? "end_turn" : outcome;
+}
 
+async function runDailyRollupUnlocked(
+  deps: RollupDeps,
+  dateLabel: string,
+): Promise<RunDailyRollupResult> {
   const gathered = await gatherDayContent(deps.db, dateLabel);
   if (!gathered) {
     return { dateLabel, status: "skipped_no_content", sourceEntryCount: 0, truncated: false };
@@ -192,16 +194,16 @@ export async function runDailyRollup(
   await deps.db.insert(agentRuns).values({
     turnId: runId,
     requestJson: result.requestJson,
-    stopReason: result.summary ? "end_turn" : "refusal",
+    stopReason: stopReasonFor(result.outcome),
     usage: result.usage,
     estimatedCostUsd: estimateCostUsd(result.usage).toFixed(6),
     latencyMillis,
   });
 
-  if (!result.summary) {
+  if (result.outcome !== "ok" || !result.summary) {
     return {
       dateLabel,
-      status: "skipped_refusal",
+      status: result.outcome === "refusal" ? "skipped_refusal" : "skipped_error",
       sourceEntryCount: gathered.sourceEntryIds.length,
       truncated: gathered.truncated,
     };
@@ -235,4 +237,37 @@ export async function runDailyRollup(
     sourceEntryCount: gathered.sourceEntryIds.length,
     truncated: gathered.truncated,
   };
+}
+
+/**
+ * Runs (or re-runs) the daily rollup for one Buenos-Aires-local date.
+ * Idempotent: re-running the same date with the same underlying content
+ * upserts the existing row (`daily_rollups.rollup_date` is unique) and
+ * does not create a duplicate. Logs the summarizer call into
+ * `agent_runs` even on a skipped-by-refusal or skipped-by-error day, so
+ * the cost/attempt is still visible — but never on a skipped-no-content
+ * day, which makes no model call at all.
+ *
+ * Guarded by a run-level Postgres advisory lock (`DAILY_ROLLUP_LOCK_KEY`
+ * — see `lib/advisory-lock.ts`): if the 04:00 schedule fires while an
+ * admin backfill (or another concurrent trigger) is already running
+ * this job, the second caller returns `"already_running"` immediately
+ * rather than doing the (cheap, but non-zero) model call twice.
+ */
+export async function runDailyRollup(
+  deps: RollupDeps,
+  params: RunDailyRollupParams = {},
+): Promise<RunDailyRollupResult> {
+  const dateLabel = params.date ?? yesterdayDateLabel();
+  if (!isValidDateLabel(dateLabel)) {
+    throw new Error(`invalid date for daily rollup: ${dateLabel}`);
+  }
+
+  const locked = await runWithAdvisoryLock(deps.pool, DAILY_ROLLUP_LOCK_KEY, () =>
+    runDailyRollupUnlocked(deps, dateLabel),
+  );
+  if (!locked.ran) {
+    return { dateLabel, status: "already_running", sourceEntryCount: 0, truncated: false };
+  }
+  return locked.result;
 }

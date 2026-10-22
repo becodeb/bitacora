@@ -45,6 +45,8 @@ function toAgentUsage(usage: Anthropic.Usage): AgentUsage {
   };
 }
 
+const EMPTY_USAGE: AgentUsage = { inputTokens: 0, outputTokens: 0 };
+
 export function createClaudeRollupSummarizer(
   options: ClaudeRollupSummarizerOptions,
 ): RollupSummarizer {
@@ -55,20 +57,26 @@ export function createClaudeRollupSummarizer(
     const userMessage = `Fecha: ${params.dateLabel}\n\nContenido del día:\n${params.content}`;
     const requestJson = { system, model: ROLLUP_MODEL, message: userMessage };
 
-    const response = await client.messages.create({
-      model: ROLLUP_MODEL,
-      max_tokens: ROLLUP_MAX_TOKENS,
-      thinking: { type: "adaptive" },
-      output_config: { effort: "low" },
-      system,
-      messages: [{ role: "user", content: userMessage }],
-    });
+    let response: Anthropic.Message;
+    try {
+      response = await client.messages.create({
+        model: ROLLUP_MODEL,
+        max_tokens: ROLLUP_MAX_TOKENS,
+        thinking: { type: "adaptive" },
+        output_config: { effort: "low" },
+        system,
+        messages: [{ role: "user", content: userMessage }],
+      });
+    } catch (error) {
+      console.error(`daily rollup: Claude call failed for ${params.dateLabel}:`, error);
+      return { summary: null, usage: EMPTY_USAGE, requestJson, outcome: "error" };
+    }
 
     const usage = toAgentUsage(response.usage);
 
     if (response.stop_reason === "refusal") {
       console.error(`daily rollup: Claude refused for ${params.dateLabel}`);
-      return { summary: null, usage, requestJson };
+      return { summary: null, usage, requestJson, outcome: "refusal" };
     }
 
     const text = response.content
@@ -77,7 +85,12 @@ export function createClaudeRollupSummarizer(
       .join("")
       .trim();
 
-    return { summary: text.length > 0 ? text : null, usage, requestJson };
+    if (text.length === 0) {
+      console.error(`daily rollup: Claude returned no usable text for ${params.dateLabel}`);
+      return { summary: null, usage, requestJson, outcome: "error" };
+    }
+
+    return { summary: text, usage, requestJson, outcome: "ok" };
   }
 
   return { summarize };

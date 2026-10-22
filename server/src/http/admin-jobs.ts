@@ -37,11 +37,17 @@ export function createAdminJobsRouter(deps: AdminJobsDeps): Hono {
         return c.json({ ok: false, error: `invalid date: ${parsed.data.date}` }, 400);
       }
       const result = await runDailyRollup(deps.rollup, { date: parsed.data.date });
+      if (result.status === "already_running") {
+        return c.json({ ok: false, error: "daily-rollup is already running" }, 409);
+      }
       return c.json({ ok: true, result }, 200);
     }
 
     if (name === "nightly-consolidation") {
       const result = await runNightlyConsolidation(deps.consolidation);
+      if (result.status === "already_running") {
+        return c.json({ ok: false, error: "nightly-consolidation is already running" }, 409);
+      }
       return c.json({ ok: true, result }, 200);
     }
 
