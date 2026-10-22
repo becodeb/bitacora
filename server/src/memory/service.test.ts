@@ -8,7 +8,17 @@ import { createFakeEmbedder } from "../embeddings/test-helpers.js";
 import { processEmbedJob } from "../jobs/embed.js";
 import { EMBED_QUEUE } from "../jobs/queues.js";
 import { assertDefined } from "../test/assert.js";
-import { rememberFact, undoLast, undoTurn, updateRule } from "./service.js";
+import {
+  correctMemoryContent,
+  deactivateRule,
+  invalidateMemoryManually,
+  moveMemoryTopic,
+  rememberFact,
+  renameTopic,
+  undoLast,
+  undoTurn,
+  updateRule,
+} from "./service.js";
 import { createScriptedJudge } from "./test-helpers.js";
 
 const DEV_DATABASE_URL =
@@ -414,5 +424,279 @@ describe("undoTurn / undoLast", () => {
       .from(rules)
       .where(eq(rules.id, inserted.ruleId));
     expect(afterInsertUndo).toBeUndefined();
+  });
+});
+
+describe("correctMemoryContent", () => {
+  it("supersedes the old memory with the corrected text, same topic and source entry, logged as manual_edit", async () => {
+    const sourceEntryId = await makeEntry("texto");
+    const judge = createScriptedJudge([{ action: "add" }]);
+    const original = await rememberFact(deps(judge), {
+      content: "El owner vive en Montevideo.",
+      topicName: "Home",
+      sourceEntryId,
+      turnId: randomUUID(),
+    });
+    if (original.topicId) createdTopicIds.push(original.topicId);
+
+    const turnId = randomUUID();
+    const result = await correctMemoryContent(
+      { db: db.orm, boss },
+      {
+        memoryId: assertDefined(original.memoryId),
+        content: "El owner vive en Buenos Aires.",
+        turnId,
+      },
+    );
+    if (result === "not_found") throw new Error("expected a result");
+
+    expect(result.supersededId).toBe(original.memoryId);
+    expect(result.topicId).toBe(original.topicId);
+
+    const [newRow] = await db.orm.select().from(memories).where(eq(memories.id, result.memoryId));
+    expect(newRow?.content).toBe("El owner vive en Buenos Aires.");
+    expect(newRow?.topicId).toBe(original.topicId);
+    expect(newRow?.sourceEntryId).toBe(sourceEntryId);
+
+    const [oldRow] = await db.orm
+      .select()
+      .from(memories)
+      .where(eq(memories.id, assertDefined(original.memoryId)));
+    expect(oldRow?.validTo).not.toBeNull();
+
+    const logRows = await db.orm
+      .select()
+      .from(changeLog)
+      .where(eq(changeLog.actionGroupId, turnId));
+    expect(logRows.every((row) => row.source === "manual_edit")).toBe(true);
+
+    await undoTurn({ db: db.orm }, turnId);
+    const [restoredOld] = await db.orm
+      .select()
+      .from(memories)
+      .where(eq(memories.id, assertDefined(original.memoryId)));
+    expect(restoredOld?.validTo).toBeNull();
+    const [deletedNew] = await db.orm
+      .select()
+      .from(memories)
+      .where(eq(memories.id, result.memoryId));
+    expect(deletedNew).toBeUndefined();
+  });
+
+  it("returns not_found for an unknown or already-invalid memory", async () => {
+    const result = await correctMemoryContent(
+      { db: db.orm, boss },
+      { memoryId: randomUUID(), content: "x", turnId: randomUUID() },
+    );
+    expect(result).toBe("not_found");
+  });
+});
+
+describe("invalidateMemoryManually", () => {
+  it("invalidates a live memory, undoably", async () => {
+    const sourceEntryId = await makeEntry("texto");
+    const judge = createScriptedJudge([{ action: "add" }]);
+    const created = await rememberFact(deps(judge), {
+      content: "fact to delete",
+      sourceEntryId,
+      turnId: randomUUID(),
+    });
+
+    const turnId = randomUUID();
+    const result = await invalidateMemoryManually(
+      { db: db.orm },
+      { memoryId: assertDefined(created.memoryId), turnId },
+    );
+    if (result === "not_found") throw new Error("expected a result");
+
+    const [row] = await db.orm.select().from(memories).where(eq(memories.id, result.memoryId));
+    expect(row?.validTo).not.toBeNull();
+
+    await undoTurn({ db: db.orm }, turnId);
+    const [restored] = await db.orm.select().from(memories).where(eq(memories.id, result.memoryId));
+    expect(restored?.validTo).toBeNull();
+  });
+
+  it("returns not_found for an already-invalid memory", async () => {
+    const sourceEntryId = await makeEntry("texto");
+    const judge = createScriptedJudge([{ action: "add" }]);
+    const created = await rememberFact(deps(judge), {
+      content: "fact to delete twice",
+      sourceEntryId,
+      turnId: randomUUID(),
+    });
+    await invalidateMemoryManually(
+      { db: db.orm },
+      { memoryId: assertDefined(created.memoryId), turnId: randomUUID() },
+    );
+
+    const second = await invalidateMemoryManually(
+      { db: db.orm },
+      { memoryId: assertDefined(created.memoryId), turnId: randomUUID() },
+    );
+    expect(second).toBe("not_found");
+  });
+});
+
+describe("moveMemoryTopic", () => {
+  it("moves a live memory to another topic and logs it as a plain update, not a supersede", async () => {
+    const sourceEntryId = await makeEntry("texto");
+    const judge = createScriptedJudge([{ action: "add" }, { action: "add" }]);
+    const created = await rememberFact(deps(judge), {
+      content: "fact to move",
+      topicName: "Old Topic",
+      sourceEntryId,
+      turnId: randomUUID(),
+    });
+    if (created.topicId) createdTopicIds.push(created.topicId);
+    const otherTopic = await rememberFact(deps(judge), {
+      content: "other fact",
+      topicName: "New Topic",
+      sourceEntryId,
+      turnId: randomUUID(),
+    });
+    if (otherTopic.topicId) createdTopicIds.push(otherTopic.topicId);
+
+    const turnId = randomUUID();
+    const result = await moveMemoryTopic(
+      { db: db.orm },
+      {
+        memoryId: assertDefined(created.memoryId),
+        topicId: assertDefined(otherTopic.topicId),
+        turnId,
+      },
+    );
+    if (result === "not_found" || result === "topic_not_found")
+      throw new Error("expected a result");
+
+    expect(result.topicId).toBe(otherTopic.topicId);
+    const [row] = await db.orm.select().from(memories).where(eq(memories.id, result.memoryId));
+    expect(row?.content).toBe("fact to move");
+    expect(row?.topicId).toBe(otherTopic.topicId);
+
+    const logRows = await db.orm
+      .select()
+      .from(changeLog)
+      .where(eq(changeLog.actionGroupId, turnId));
+    expect(logRows).toHaveLength(1);
+    expect(logRows[0]?.operation).toBe("update");
+
+    await undoTurn({ db: db.orm }, turnId);
+    const [restored] = await db.orm.select().from(memories).where(eq(memories.id, result.memoryId));
+    expect(restored?.topicId).toBe(created.topicId);
+  });
+
+  it("returns topic_not_found for an unknown destination topic", async () => {
+    const sourceEntryId = await makeEntry("texto");
+    const judge = createScriptedJudge([{ action: "add" }]);
+    const created = await rememberFact(deps(judge), {
+      content: "fact",
+      sourceEntryId,
+      turnId: randomUUID(),
+    });
+
+    const result = await moveMemoryTopic(
+      { db: db.orm },
+      { memoryId: assertDefined(created.memoryId), topicId: randomUUID(), turnId: randomUUID() },
+    );
+    expect(result).toBe("topic_not_found");
+  });
+});
+
+describe("renameTopic", () => {
+  it("renames and redescribes a topic, logged and undoable", async () => {
+    const sourceEntryId = await makeEntry("texto");
+    const judge = createScriptedJudge([{ action: "add" }]);
+    const created = await rememberFact(deps(judge), {
+      content: "fact",
+      topicName: `Rename Me ${randomUUID()}`,
+      sourceEntryId,
+      turnId: randomUUID(),
+    });
+    const topicId = assertDefined(created.topicId);
+    createdTopicIds.push(topicId);
+
+    const turnId = randomUUID();
+    const result = await renameTopic(
+      { db: db.orm, boss },
+      { topicId, name: "Renamed Topic", description: "a new description", turnId },
+    );
+    if (result === "not_found" || result === "conflict") throw new Error("expected a result");
+    expect(result.topic.name).toBe("Renamed Topic");
+    expect(result.topic.description).toBe("a new description");
+
+    await undoTurn({ db: db.orm }, turnId);
+    const [restored] = await db.orm.select().from(topics).where(eq(topics.id, topicId));
+    expect(restored?.name.toLowerCase().startsWith("rename me")).toBe(true);
+    expect(restored?.description).toBeNull();
+  });
+
+  it("returns conflict when the new name collides case-insensitively with another topic", async () => {
+    const sourceEntryId = await makeEntry("texto");
+    const judge = createScriptedJudge([{ action: "add" }, { action: "add" }]);
+    const unique = randomUUID();
+    const topicA = await rememberFact(deps(judge), {
+      content: "fact a",
+      topicName: `Conflict A ${unique}`,
+      sourceEntryId,
+      turnId: randomUUID(),
+    });
+    const topicB = await rememberFact(deps(judge), {
+      content: "fact b",
+      topicName: `Conflict B ${unique}`,
+      sourceEntryId,
+      turnId: randomUUID(),
+    });
+    if (topicA.topicId) createdTopicIds.push(topicA.topicId);
+    if (topicB.topicId) createdTopicIds.push(topicB.topicId);
+
+    const result = await renameTopic(
+      { db: db.orm, boss },
+      {
+        topicId: assertDefined(topicB.topicId),
+        name: `conflict a ${unique}`,
+        turnId: randomUUID(),
+      },
+    );
+    expect(result).toBe("conflict");
+  });
+
+  it("returns not_found for an unknown topic", async () => {
+    const result = await renameTopic(
+      { db: db.orm, boss },
+      { topicId: randomUUID(), name: "x", turnId: randomUUID() },
+    );
+    expect(result).toBe("not_found");
+  });
+});
+
+describe("deactivateRule", () => {
+  it("deactivates an active rule, undoably", async () => {
+    const key = `test-rule-${randomUUID()}`;
+    const inserted = await updateRule(
+      { db: db.orm, boss },
+      { key, payload: { leadMinutes: 15 }, turnId: randomUUID() },
+    );
+    createdRuleIds.push(inserted.ruleId);
+
+    const turnId = randomUUID();
+    const result = await deactivateRule({ db: db.orm }, { key, turnId });
+    if (result === "not_found") throw new Error("expected a result");
+    expect(result.ruleId).toBe(inserted.ruleId);
+
+    const [row] = await db.orm.select().from(rules).where(eq(rules.id, inserted.ruleId));
+    expect(row?.active).toBe(false);
+
+    await undoTurn({ db: db.orm }, turnId);
+    const [restored] = await db.orm.select().from(rules).where(eq(rules.id, inserted.ruleId));
+    expect(restored?.active).toBe(true);
+  });
+
+  it("returns not_found for an unknown key", async () => {
+    const result = await deactivateRule(
+      { db: db.orm },
+      { key: "does-not-exist", turnId: randomUUID() },
+    );
+    expect(result).toBe("not_found");
   });
 });

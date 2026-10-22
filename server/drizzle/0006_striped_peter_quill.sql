@@ -1,0 +1,2 @@
+CREATE TYPE "public"."change_log_source" AS ENUM('chat_turn', 'consolidation', 'manual_edit');--> statement-breakpoint
+ALTER TABLE "change_log" ADD COLUMN "source" "change_log_source" DEFAULT 'manual_edit' NOT NULL;

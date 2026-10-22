@@ -52,6 +52,20 @@ export const chatMessageRole = pgEnum("chat_message_role", ["user", "assistant",
 export const changeLogOperation = pgEnum("change_log_operation", ["insert", "update", "delete"]);
 
 /**
+ * What caused a `change_log` group: an agent turn's own tool call
+ * (`memory/service.ts`'s `rememberFact`/`updateRule`), the nightly
+ * consolidation job (T08, `consolidation/consolidation.ts`), or an
+ * owner-made correction from the "What I know about you" screen (T10,
+ * `http/me.ts`). Lets `GET /v1/me/changes` tell the three apart without
+ * guessing from a group's row shapes.
+ */
+export const changeLogSource = pgEnum("change_log_source", [
+  "chat_turn",
+  "consolidation",
+  "manual_edit",
+]);
+
+/**
  * Named groups of memories ("University", "Work", "Juan", ...). Names are
  * unique case-insensitively via `topicsNameUniqueIdx` below, so "Juan" and
  * "juan" collide.
@@ -240,6 +254,10 @@ export const changeLog = pgTable(
     operation: changeLogOperation("operation").notNull(),
     before: jsonb("before"),
     after: jsonb("after"),
+    // Every row in one `actionGroupId` group is always written by the
+    // same caller in the same transaction set, so this is uniform
+    // within a group — see `changeLogSource`'s own comment.
+    source: changeLogSource("source").notNull().default("manual_edit"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     undoneAt: timestamp("undone_at", { withTimezone: true }),
   },

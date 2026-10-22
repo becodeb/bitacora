@@ -21,6 +21,9 @@ export interface MemoryServiceDeps {
   judge: MemoryJudge;
 }
 
+/** Mirrors `db/schema.ts`'s `changeLogSource` enum; see that enum's own comment. */
+export type ChangeLogSource = "chat_turn" | "consolidation" | "manual_edit";
+
 /** How many existing live memories are offered to the judge as dedup candidates. */
 const DEDUP_CANDIDATE_LIMIT = 5;
 
@@ -29,6 +32,8 @@ export interface RememberFactParams {
   topicName?: string;
   sourceEntryId: string;
   turnId: string;
+  /** Defaults to `"chat_turn"`: this function's only caller today (`agent/tools.ts`'s `remember` tool) always runs inside a chat turn. */
+  source?: ChangeLogSource;
 }
 
 export interface RememberFactResult {
@@ -45,6 +50,8 @@ export interface UpdateRuleParams {
   payload: unknown;
   topicName?: string;
   turnId: string;
+  /** Defaults to `"chat_turn"`; see `RememberFactParams.source`'s comment. */
+  source?: ChangeLogSource;
 }
 
 export interface UpdateRuleResult {
@@ -106,6 +113,7 @@ async function writeChangeLog(
     operation: "insert" | "update" | "delete";
     before: unknown;
     after: unknown;
+    source: ChangeLogSource;
   },
 ): Promise<void> {
   await tx.insert(changeLog).values({
@@ -115,6 +123,7 @@ async function writeChangeLog(
     operation: entry.operation,
     before: entry.before ?? null,
     after: entry.after ?? null,
+    source: entry.source,
   });
 }
 
@@ -171,6 +180,7 @@ export async function rememberFact(
       operation: "insert",
       before: null,
       after: insertValues,
+      source: params.source ?? "chat_turn",
     });
     await enqueueEmbedJob(deps.boss, { targetTable: "memories", targetId: memoryId }, tx);
     await bumpTopicMemoriesChanged(tx, topicId);
@@ -189,6 +199,7 @@ export async function rememberFact(
         operation: "update",
         before: { validTo: before?.validTo ?? null },
         after: { validTo: now.toISOString() },
+        source: params.source ?? "chat_turn",
       });
       return {
         memoryId,
@@ -303,6 +314,7 @@ export async function updateRule(
         operation: "insert",
         before: null,
         after: insertValues,
+        source: params.source ?? "chat_turn",
       });
       return { ruleId, action: "insert" as const };
     }
@@ -333,8 +345,303 @@ export async function updateRule(
       operation: "update",
       before,
       after,
+      source: params.source ?? "chat_turn",
     });
     return { ruleId: existing.id, action: "update" as const };
+  });
+}
+
+export interface CorrectMemoryContentParams {
+  memoryId: string;
+  content: string;
+  turnId: string;
+}
+
+export interface CorrectMemoryContentResult {
+  memoryId: string;
+  supersededId: string;
+  topicId: string | null;
+}
+
+/**
+ * Owner-made correction from the "What I know about you" screen (T10):
+ * supersedes `memoryId` with a new memory holding `content`, keeping
+ * the same topic and source entry — never rewrites the old row in
+ * place, per `db/schema.ts`'s documented invariant. Returns
+ * `"not_found"` for an unknown id or one that is no longer live (it
+ * was already corrected, deleted, or superseded by something else);
+ * the caller maps that to a 404.
+ */
+export async function correctMemoryContent(
+  deps: Pick<MemoryServiceDeps, "db" | "boss">,
+  params: CorrectMemoryContentParams,
+): Promise<CorrectMemoryContentResult | "not_found"> {
+  return deps.db.transaction(async (tx) => {
+    const [existing] = await tx.select().from(memories).where(eq(memories.id, params.memoryId));
+    if (!existing || existing.validTo !== null) {
+      return "not_found" as const;
+    }
+
+    const memoryId = randomUUID();
+    const insertValues = {
+      id: memoryId,
+      content: params.content,
+      topicId: existing.topicId,
+      sourceEntryId: existing.sourceEntryId,
+      supersedesId: existing.id,
+    };
+    await tx.insert(memories).values(insertValues);
+    await writeChangeLog(tx, {
+      actionGroupId: params.turnId,
+      targetTable: "memories",
+      targetId: memoryId,
+      operation: "insert",
+      before: null,
+      after: insertValues,
+      source: "manual_edit",
+    });
+    await enqueueEmbedJob(deps.boss, { targetTable: "memories", targetId: memoryId }, tx);
+    await bumpTopicMemoriesChanged(tx, existing.topicId);
+
+    const now = new Date();
+    await tx.update(memories).set({ validTo: now }).where(eq(memories.id, existing.id));
+    await writeChangeLog(tx, {
+      actionGroupId: params.turnId,
+      targetTable: "memories",
+      targetId: existing.id,
+      operation: "update",
+      before: { validTo: existing.validTo },
+      after: { validTo: now.toISOString() },
+      source: "manual_edit",
+    });
+
+    return { memoryId, supersededId: existing.id, topicId: existing.topicId };
+  });
+}
+
+export interface InvalidateMemoryParams {
+  memoryId: string;
+  turnId: string;
+}
+
+export interface InvalidateMemoryResult {
+  memoryId: string;
+}
+
+/**
+ * `DELETE /v1/me/memories/:id`: invalidates (`validTo = now`) rather
+ * than hard-deleting, so the memory stays in history and the delete is
+ * undoable via `undoTurn`. `"not_found"` for an unknown or already
+ * non-live id.
+ */
+export async function invalidateMemoryManually(
+  deps: Pick<MemoryServiceDeps, "db">,
+  params: InvalidateMemoryParams,
+): Promise<InvalidateMemoryResult | "not_found"> {
+  return deps.db.transaction(async (tx) => {
+    const [existing] = await tx.select().from(memories).where(eq(memories.id, params.memoryId));
+    if (!existing || existing.validTo !== null) {
+      return "not_found" as const;
+    }
+
+    const now = new Date();
+    await tx.update(memories).set({ validTo: now }).where(eq(memories.id, existing.id));
+    await writeChangeLog(tx, {
+      actionGroupId: params.turnId,
+      targetTable: "memories",
+      targetId: existing.id,
+      operation: "update",
+      before: { validTo: existing.validTo },
+      after: { validTo: now.toISOString() },
+      source: "manual_edit",
+    });
+    await bumpTopicMemoriesChanged(tx, existing.topicId);
+
+    return { memoryId: existing.id };
+  });
+}
+
+export interface MoveMemoryTopicParams {
+  memoryId: string;
+  /** `null` unassigns the memory from any topic. */
+  topicId: string | null;
+  turnId: string;
+}
+
+export interface MoveMemoryTopicResult {
+  memoryId: string;
+  topicId: string | null;
+}
+
+/**
+ * Moves a live memory to another topic (or to no topic). Logged as a
+ * plain in-place `update` of `topicId` — NOT a supersede — because
+ * `content` does not change: this is purely organizational metadata,
+ * and versioning it with a new memory row would create a duplicate
+ * with identical text for no benefit (contrast with
+ * `correctMemoryContent`, which does change the owner-visible fact and
+ * therefore must supersede). `"not_found"` for an unknown/non-live
+ * memory id, `"topic_not_found"` for a non-null `topicId` that does
+ * not exist.
+ */
+export async function moveMemoryTopic(
+  deps: Pick<MemoryServiceDeps, "db">,
+  params: MoveMemoryTopicParams,
+): Promise<MoveMemoryTopicResult | "not_found" | "topic_not_found"> {
+  return deps.db.transaction(async (tx) => {
+    const [existing] = await tx.select().from(memories).where(eq(memories.id, params.memoryId));
+    if (!existing || existing.validTo !== null) {
+      return "not_found" as const;
+    }
+
+    if (params.topicId !== null) {
+      const [topic] = await tx
+        .select({ id: topics.id })
+        .from(topics)
+        .where(eq(topics.id, params.topicId));
+      if (!topic) {
+        return "topic_not_found" as const;
+      }
+    }
+
+    if (existing.topicId === params.topicId) {
+      return { memoryId: existing.id, topicId: existing.topicId };
+    }
+
+    await tx.update(memories).set({ topicId: params.topicId }).where(eq(memories.id, existing.id));
+    await writeChangeLog(tx, {
+      actionGroupId: params.turnId,
+      targetTable: "memories",
+      targetId: existing.id,
+      operation: "update",
+      before: { topicId: existing.topicId },
+      after: { topicId: params.topicId },
+      source: "manual_edit",
+    });
+    await bumpTopicMemoriesChanged(tx, existing.topicId);
+    await bumpTopicMemoriesChanged(tx, params.topicId);
+
+    return { memoryId: existing.id, topicId: params.topicId };
+  });
+}
+
+export interface RenameTopicParams {
+  topicId: string;
+  name?: string;
+  description?: string | null;
+  turnId: string;
+}
+
+export interface RenameTopicResult {
+  topic: { id: string; name: string; description: string | null };
+}
+
+/**
+ * Renames and/or redescribes a topic. `"not_found"` for an unknown id;
+ * `"conflict"` when `name` collides case-insensitively with a
+ * *different* topic (matching `topics_name_lower_unique_idx` in
+ * `db/schema.ts`). Re-enqueues the topic's embedding only when `name`
+ * or `description` actually changed — matching `jobs/embed.ts`'s own
+ * documented policy for topics ("callers are expected to only enqueue
+ * a topic's embedding when its name/description/summary actually
+ * changed").
+ */
+export async function renameTopic(
+  deps: Pick<MemoryServiceDeps, "db" | "boss">,
+  params: RenameTopicParams,
+): Promise<RenameTopicResult | "not_found" | "conflict"> {
+  return deps.db.transaction(async (tx) => {
+    const [existing] = await tx.select().from(topics).where(eq(topics.id, params.topicId));
+    if (!existing) {
+      return "not_found" as const;
+    }
+
+    if (params.name !== undefined) {
+      const [conflict] = await tx
+        .select({ id: topics.id })
+        .from(topics)
+        .where(
+          sql`lower(${topics.name}) = lower(${params.name}) and ${topics.id} != ${params.topicId}`,
+        );
+      if (conflict) {
+        return "conflict" as const;
+      }
+    }
+
+    const before = { name: existing.name, description: existing.description };
+    const after = {
+      name: params.name ?? existing.name,
+      description: params.description === undefined ? existing.description : params.description,
+    };
+    const changed = after.name !== before.name || after.description !== before.description;
+
+    await tx
+      .update(topics)
+      .set({ name: after.name, description: after.description, updatedAt: new Date() })
+      .where(eq(topics.id, params.topicId));
+    await writeChangeLog(tx, {
+      actionGroupId: params.turnId,
+      targetTable: "topics",
+      targetId: params.topicId,
+      operation: "update",
+      before,
+      after,
+      source: "manual_edit",
+    });
+    if (changed) {
+      await enqueueEmbedJob(deps.boss, { targetTable: "topics", targetId: params.topicId }, tx);
+    }
+
+    return { topic: { id: params.topicId, name: after.name, description: after.description } };
+  });
+}
+
+export interface DeactivateRuleParams {
+  key: string;
+  turnId: string;
+}
+
+export interface DeactivateRuleResult {
+  ruleId: string;
+}
+
+/**
+ * `DELETE /v1/me/rules/:key`: deactivates an active rule (`active =
+ * false`), logged and undoable via `undoTurn`'s existing `rules`
+ * `update` handling. `"not_found"` for an unknown key or one that is
+ * already inactive.
+ */
+export async function deactivateRule(
+  deps: Pick<MemoryServiceDeps, "db">,
+  params: DeactivateRuleParams,
+): Promise<DeactivateRuleResult | "not_found"> {
+  return deps.db.transaction(async (tx) => {
+    const [existing] = await tx.select().from(rules).where(eq(rules.key, params.key));
+    if (!existing?.active) {
+      return "not_found" as const;
+    }
+
+    const before = {
+      payload: existing.payload,
+      topicId: existing.topicId,
+      active: existing.active,
+    };
+    const after = { ...before, active: false };
+    await tx
+      .update(rules)
+      .set({ active: false, updatedAt: new Date() })
+      .where(eq(rules.id, existing.id));
+    await writeChangeLog(tx, {
+      actionGroupId: params.turnId,
+      targetTable: "rules",
+      targetId: existing.id,
+      operation: "update",
+      before,
+      after,
+      source: "manual_edit",
+    });
+
+    return { ruleId: existing.id };
   });
 }
 
@@ -372,13 +679,20 @@ export interface UndoResult {
  *   fact later. The FK `supersedesId` is `ON DELETE SET NULL`, so
  *   deleting it is always safe even if an update op in the same group
  *   pointed at it.
- * - `memories` `update`: this is always the "supersede" half of an
- *   UPDATE decision (`rememberFact`'s only other write to an existing
- *   memory row) — reverted by restoring `before.validTo` (`null`),
- *   making the candidate live again.
+ * - `memories` `update`: either the "supersede" half of an UPDATE
+ *   decision (`before: {validTo}`, from `rememberFact` or
+ *   `correctMemoryContent`/`invalidateMemoryManually`) or a topic move
+ *   (`before: {topicId}`, from `moveMemoryTopic`) — reverted by
+ *   restoring whichever field(s) `before` actually holds, generically:
+ *   it is never both in the same row, since each writer only ever
+ *   changes one.
  * - `rules` `insert`: hard-deleted.
  * - `rules` `update`: restored from `before` (`payload`, `topicId`,
- *   `active`).
+ *   `active`) — covers both `updateRule`'s own updates and
+ *   `deactivateRule`'s `active: false`.
+ * - `topics` `update`: restored from `before` (`name`, `description`),
+ *   from `renameTopic`. Topic creation itself is still never logged
+ *   (see above), so there is no `topics` `insert` case.
  */
 export async function undoTurn(
   deps: Pick<MemoryServiceDeps, "db">,
@@ -396,11 +710,26 @@ export async function undoTurn(
         if (row.operation === "insert") {
           await tx.delete(memories).where(eq(memories.id, row.targetId));
         } else if (row.operation === "update") {
-          const before = row.before as { validTo: string | null } | null;
-          await tx
-            .update(memories)
-            .set({ validTo: before?.validTo ? new Date(before.validTo) : null })
-            .where(eq(memories.id, row.targetId));
+          const before = row.before as { validTo?: string | null; topicId?: string | null } | null;
+          if (before) {
+            const set: { validTo?: Date | null; topicId?: string | null } = {};
+            if ("validTo" in before) {
+              set.validTo = before.validTo ? new Date(before.validTo) : null;
+            }
+            if ("topicId" in before) {
+              set.topicId = before.topicId ?? null;
+            }
+            if (Object.keys(set).length > 0) {
+              await tx.update(memories).set(set).where(eq(memories.id, row.targetId));
+            }
+          }
+        }
+      } else if (row.targetTable === "topics") {
+        if (row.operation === "update") {
+          const before = row.before as { name?: string; description?: string | null } | null;
+          if (before) {
+            await tx.update(topics).set(before).where(eq(topics.id, row.targetId));
+          }
         }
       } else if (row.targetTable === "rules") {
         if (row.operation === "insert") {

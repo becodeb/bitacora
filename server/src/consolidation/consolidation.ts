@@ -180,6 +180,10 @@ async function logChangeLog(
     operation: entry.operation,
     before: entry.before ?? null,
     after: entry.after ?? null,
+    // Distinguishes this job's groups from a chat turn's or an
+    // owner-made edit's in `GET /v1/me/changes` (T10, `http/me.ts`);
+    // see `db/schema.ts`'s `changeLogSource` comment.
+    source: "consolidation" as const,
   });
 }
 
