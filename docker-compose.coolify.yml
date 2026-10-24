@@ -1,0 +1,75 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Bitacora — Coolify deployment (Docker Compose build pack)
+#
+#   Build pack:            Docker Compose
+#   Compose file location: /docker-compose.coolify.yml
+#   Domain:                set on the `app` service in Coolify's UI, not here
+#
+# Only the `app` service lives here. The database is a SEPARATE
+# Coolify-managed Postgres resource (image `pgvector/pgvector:pg17`, so
+# Coolify's scheduled backups cover it); it is not part of this compose
+# file, and this file never declares a `db` service. The app receives
+# `DATABASE_URL` for that resource through Coolify's own env store.
+#
+# No published `ports`: Coolify's proxy routes to the container by the
+# `expose`d port and the domain configured on the `app` resource. No
+# `container_name`, no external `networks` — Coolify creates the
+# resource's own private network and attaches the proxy to it.
+#
+# ── Attachments (persistent) ────────────────────────────────────────────────
+# DATA_DIR is bind-mounted at an ABSOLUTE host path, in short syntax
+# (`<host path>:<container path>`). On this Coolify, a named volume is
+# rewritten/prefixed by the resource's uuid, and an absolute path given
+# in long syntax is rewritten too — only a short-syntax absolute host
+# path passes through unchanged. The server itself creates the
+# directory and fixes its ownership for the unprivileged `node` user on
+# every start (see `server/docker-entrypoint.sh`); Coolify only needs
+# the host directory to exist (or Docker creates it on first run).
+#
+# ── Secrets ──────────────────────────────────────────────────────────────────
+# Every variable below is read from Coolify's env store for this
+# resource at deploy time (its UI, not a committed `.env`). Required
+# variables are referenced bare (`$VAR`): if Coolify has not set them,
+# the container gets an empty string and the server's own config
+# validation (`server/src/config.ts`) refuses to start with a clear
+# error — fail fast, not a silent misconfiguration. Optional variables
+# use `${VAR:-default}` so an unset Coolify variable falls back to a
+# real default INSTEAD of an empty string: compose's own variable
+# substitution happens before the container ever starts, so the
+# server's `zod` schema defaults (which only apply when a variable is
+# absent, not when it is set to `""`) would otherwise never kick in.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  app:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: $DATABASE_URL
+      APP_TOKEN: $APP_TOKEN
+      ANTHROPIC_API_KEY: $ANTHROPIC_API_KEY
+      GROQ_API_KEY: $GROQ_API_KEY
+      VOYAGE_API_KEY: $VOYAGE_API_KEY
+      AGENT_EFFORT: ${AGENT_EFFORT:-low}
+      PORT: ${PORT:-3000}
+      DATA_DIR: ${DATA_DIR:-/data/attachments}
+    expose:
+      - "3000"
+    volumes:
+      - /data/bitacora/attachments:/data/attachments
+    healthcheck:
+      # Alpine (the runtime base image) ships busybox wget, not curl;
+      # busybox wget exits non-zero on an HTTP error status, so a 503
+      # from /health (db down, see server/src/http/app.ts) already
+      # fails the check on its own. The `grep` on top also fails the
+      # check if the server replies 200 with `ok: false` somehow.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/health | grep -q '\"ok\":true'"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      # The entrypoint runs pending Drizzle migrations (src/db/migrate.ts)
+      # before the HTTP server starts listening at all, so a cold start
+      # against a fresh database needs real headroom here.
+      start_period: 60s

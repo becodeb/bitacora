@@ -6,6 +6,7 @@ import { createClaudeConsolidationJudge } from "./consolidation/claude-consolida
 import { createClaudeTopicSummarizer } from "./consolidation/claude-topic-summarizer.js";
 import type { ConsolidationDeps } from "./consolidation/consolidation.js";
 import { checkDb, createDb } from "./db/client.js";
+import { runMigrations } from "./db/migrate.js";
 import { createVoyageEmbedder } from "./embeddings/voyage.js";
 import type { AdminJobsDeps } from "./http/admin-jobs.js";
 import { createApp } from "./http/app.js";
@@ -45,6 +46,14 @@ async function main(): Promise<void> {
   }
 
   const { pool, orm } = createDb(config.DATABASE_URL);
+
+  // Must resolve before pg-boss or the HTTP server start: the process
+  // must never serve a request, or let a worker claim a job, against a
+  // schema that is missing a table or column it expects. A rejection
+  // here propagates to `main().catch` below, which exits the process
+  // instead of coming up half-migrated.
+  await runMigrations(orm);
+
   const storage = createFileAttachmentStorage(config.DATA_DIR);
   const embedder = createVoyageEmbedder({ apiKey: config.VOYAGE_API_KEY });
 
@@ -106,7 +115,11 @@ async function main(): Promise<void> {
     adminJobs,
   });
 
-  const server = serve({ fetch: app.fetch, port: config.PORT }, (info) => {
+  // Explicit: @hono/node-server's own default is good enough for local
+  // dev, but inside a container the server must bind every interface,
+  // not just the loopback one, or the Docker network (and Coolify's
+  // healthcheck/proxy) cannot reach it.
+  const server = serve({ fetch: app.fetch, port: config.PORT, hostname: "0.0.0.0" }, (info) => {
     console.log(`bitacora server listening on port ${info.port}`);
   });
 

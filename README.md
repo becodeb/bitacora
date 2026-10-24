@@ -62,3 +62,38 @@ their DB rows are committed. Voice transcription and photo OCR run
 asynchronously afterwards, via a pg-boss worker started in the same
 process as the HTTP server (`npm run dev`/`npm start` runs both); OCR is
 a placeholder until T07 picks an engine.
+
+## Deploying (T09)
+
+The server deploys to Coolify (`coolify.becode.com.ar`) as a single
+Docker Compose resource, defined by `docker-compose.coolify.yml` at the
+repo root and built from `server/Dockerfile`.
+
+- **Build pack:** Docker Compose, compose file `/docker-compose.coolify.yml`.
+- **Services:** only `app` (the server). There is no `db` service in
+  the compose file — Postgres is a **separate** Coolify-managed
+  resource, image `pgvector/pgvector:pg17`, so Coolify's scheduled
+  backups cover it. Point the app's `DATABASE_URL` at that resource.
+- **Domain:** set on the `app` resource in Coolify's UI, not in the
+  compose file. Coolify routes to the container by the `expose`d port
+  (3000); there is no published `ports:` entry.
+- **Attachments (persistent):** bind-mounted at an absolute host path,
+  `/data/bitacora/attachments:/data/attachments` (short syntax — long
+  syntax and named volumes get rewritten/prefixed on this Coolify). The
+  container creates and `chown`s that directory for its unprivileged
+  `node` user on every start (see `server/docker-entrypoint.sh`); the
+  app itself reads `DATA_DIR=/data/attachments`.
+- **Secrets:** set in Coolify's env store for the resource, never
+  committed. Required: `DATABASE_URL`, `APP_TOKEN`, `ANTHROPIC_API_KEY`,
+  `GROQ_API_KEY`, `VOYAGE_API_KEY` (an unset required variable makes the
+  server refuse to start with a clear config error). Optional:
+  `AGENT_EFFORT` (default `low`), `PORT` (default `3000`), `DATA_DIR`
+  (default `/data/attachments`).
+- **Migrations:** applied automatically at container startup, before
+  the HTTP server or any pg-boss worker starts (`src/db/migrate.ts`,
+  using `drizzle-orm`'s own runtime migrator against the `drizzle/` SQL
+  files baked into the image). A failed migration aborts startup.
+  `npm run db:migrate` (drizzle-kit) is still the tool for local
+  development.
+- **Health:** `GET /health` reports `{ok, db}` and is wired into the
+  compose `healthcheck`.
