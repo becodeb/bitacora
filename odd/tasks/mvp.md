@@ -106,7 +106,7 @@ Out:
 | Done | `~/.credentials/bitacora.env` with `ANTHROPIC_API_KEY`, `GROQ_API_KEY` and `VOYAGE_API_KEY`. All three answered 200 on 2026-10-22. |
 | T05 | A payment method on the Voyage account, to lift the 3 requests/min limit. The 200M free tokens still apply. |
 | T10 | An Expo account. |
-| T11 | Authorization to create the GitHub repo, push and deploy. |
+| Done | Authorization to create the GitHub repo, push and deploy (given 2026-10-24). |
 | T12 | A Google Cloud project for OAuth. Publish it to "Production", because tokens expire after 7 days in Testing. |
 | T14 | A Firebase project for push. |
 | T17 | AssemblyAI and Speechmatics keys, plus three real recordings in `samples/` (gitignored). |
@@ -119,7 +119,7 @@ Out:
   - Forecast: about 8,000 authored lines.
   - Strategy: `ask-on-risk`.
   - **Chain strategy: stacked PRs to main** (owner choice, 2026-10-22).
-  - There is no remote yet, so the branches are local until T11.
+  - Remote: public repo `becodeb/bitacora` (the owner chose public on 2026-10-24). All branches are pushed. No PRs are open yet.
   - Each work unit is one branch stacked on the previous one, and each is a future PR:
 
     | # | Branch | Commit | Lines | Notes |
@@ -147,7 +147,8 @@ Out:
     | 20 | `feat/app-chat` | `93c9ab1` T10 chat screen | 1,242 | over 400; one screen with its components and tests |
     | 21 | `feat/chat-citations` | `a1214c8` T10 server: citations in history | 81 | |
     | 22 | `feat/app-attachments` | `0cfb1b8` T10 photo, voice, share target | 1,632 | over 400 |
-    | 23 | `feat/app-about-you` | `1fa15be` T10 "What I know about you" | 1,663 | over 400 |
+    | 23 | `feat/app-about-you` | `1fa15be` T10 "What I know about you" | 1,663 | over 400; plus `385a197` doc |
+    | 24 | `feat/deploy` | `64c5eac` T09 Dockerfile, compose, startup migrations | small | Coolify deploys this branch |
 
   - The next task branches from the top of the stack.
 
@@ -182,7 +183,7 @@ The parent passes the task, this document and the verification commands to every
   - Run local OCR and Haiku vision on the owner's real screenshots.
   - Decide whether OCR alone is enough, and when to fall back to vision.
 - [x] T08 Nightly consolidation and daily rollup job. Delegated. Commits `f7de017`, `63a522f`.
-- [ ] T09 Deploy to Coolify, with backups and secrets. Needs owner authorization (T11 row above).
+- [x] T09 Deploy to Coolify, with backups and secrets. Commit `64c5eac`. Live at https://bitacora.becode.com.ar.
 - [ ] T10 Expo app. Delegated. The code is done (commits `7044151`, `cc21a73`, `0c0f1ab`, `93c9ab1`, `a1214c8`, `0cfb1b8`, `1fa15be`). Still open: the EAS APK build (needs the owner's Expo account) and an on-device check.
   - Scaffold and EAS APK.
   - One-time token setup.
@@ -192,7 +193,7 @@ The parent passes the task, this document and the verification commands to every
 
 ### Stage 2: Google Calendar
 
-- [ ] T11 GitHub repo, push and deploy. Owner authorization is required.
+- [x] T11 GitHub repo, push and deploy. Authorized by the owner on 2026-10-24; repo `becodeb/bitacora`, public.
 - [ ] T12 Google OAuth on the server. Delegated.
   - Calendar read and write tools.
   - Rule-based formats.
@@ -315,6 +316,17 @@ The parent passes the task, this document and the verification commands to every
   - Checks: app tsc 0, biome 0, jest 90/90, expo-doctor 20/20, `expo export --no-bytecode` OK, prebuild plugins resolve. Server 247/247.
   - Assessments: medium. Writer self-check plus parent spot checks; each unit was verified on its own.
   - Not verified on a device: the camera and gallery picker, real recording, and the share flow.
+- **T09 and T11 (2026-10-24).**
+  - **Image.** `node:24-alpine`, multi-stage. The entrypoint chowns `DATA_DIR` and then `su-exec node`, so node is PID 1 and receives SIGTERM. Drizzle migrations run from code at boot, before pg-boss and HTTP.
+  - **Coolify (coolify.becode.com.ar, project Becode/production).**
+    - App `bitacora`, uuid `vov0mqxavcxeeu0kwvvkxttn`. Docker Compose, `/docker-compose.coolify.yml`, branch `feat/deploy`, domain `https://bitacora.becode.com.ar`.
+    - Attachments are bind-mounted from `/data/bitacora/attachments`.
+    - Env: `DATABASE_URL`, `APP_TOKEN`, `ANTHROPIC_API_KEY`, `GROQ_API_KEY`, `VOYAGE_API_KEY`, `AGENT_EFFORT=low`.
+  - **Database.** Managed Postgres `bitacora-db`, uuid `265fbhdhhyt0bsiivytifdov`, image `pgvector/pgvector:pg17`. Daily backup at `17 6 * * *` UTC (03:17 Buenos Aires), keeping 14 locally. The first backup succeeded (80 KB).
+  - **Secrets.** `APP_TOKEN` and `BITACORA_DB_PASSWORD` were generated into `~/.credentials/bitacora.env` and never printed.
+  - **No auto-deploy.** The app is created from a public repo, so a push does not deploy. Redeploy with `POST /deploy?uuid=vov0mqxavcxeeu0kwvvkxttn&force=true`.
+  - **First deploy crash-looped.** The app started while the database was still `running:starting`, and migrations failed with "Connection terminated". A redeploy fixed it. Old logs from the crashed containers still show in the logs endpoint.
+  - **Production checks.** `/health` returns `{"ok":true,"db":"up"}`. `/v1/me` returns 401 without the token and 200 with it. A real chat turn answered in voseo.
 - **Pivot (rev 4).** The plan changed:
   - It moved to the chat-and-memory focus.
   - The Telegram option was rejected.
@@ -328,7 +340,6 @@ The parent passes the task, this document and the verification commands to every
 1. Owner-gated. Everything left in stage 1 needs the owner:
    - **T07** needs real screenshots in `samples/` (gitignored).
    - **T10** needs an Expo account to build the APK, then a device test.
-   - **T09/T11** need authorization to create the GitHub repo, push and deploy to Coolify.
    - Stage 2 (T12) needs a Google Cloud OAuth project.
 2. The owner adds a payment method in Voyage to lift the 3 RPM limit (free tokens still apply).
 3. The owner rotates the three API keys when convenient, because they were pasted in chat.
